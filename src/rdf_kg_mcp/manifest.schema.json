@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rewire-bio/rdf-kg-mcp/blob/main/src/rdf_kg_mcp/manifest.schema.json",
+  "title": "rdf-kg-mcp bundle manifest",
+  "description": "Describes a knowledge-graph bundle: the RDF files it contains, their checksums and the role of each named graph. Format version 1.0.",
+  "type": "object",
+  "required": ["format_version", "dataset", "files"],
+  "properties": {
+    "format_version": { "const": "1.0" },
+    "dataset": { "type": "string", "minLength": 1, "description": "Stable name of the dataset." },
+    "version": { "type": "string", "minLength": 1, "description": "Version or release of the dataset this bundle holds." },
+    "release_id": { "type": "string", "minLength": 1, "description": "Accepted as the version when version is absent." },
+    "title": { "type": "string" },
+    "description": { "type": "string" },
+    "license": { "type": "string" },
+    "homepage": { "type": "string" },
+    "files": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$))[A-Za-z0-9._/-]+\\.(nq|trig|nt|ttl|rdf|owl)$" },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["sha256"],
+        "properties": {
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "quads": { "type": "integer", "minimum": 0 },
+          "triples": { "type": "integer", "minimum": 0 },
+          "graph": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9+.-]*:" }
+        }
+      }
+    },
+    "graphs": {
+      "type": "object",
+      "description": "Role name to named-graph IRI. Roles with meaning to the server: asserted, inferred, ontology.",
+      "additionalProperties": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9+.-]*:" }
+    },
+    "prefixes": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$|^$" },
+      "additionalProperties": { "type": "string" }
+    },
+    "label_predicates": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "example_queries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["title", "query"],
+        "properties": {
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "query": { "type": "string" }
+        }
+      }
+    },
+    "inferred": { "type": ["object", "null"] },
+    "shacl": { "type": ["object", "null"] }
+  }
+}

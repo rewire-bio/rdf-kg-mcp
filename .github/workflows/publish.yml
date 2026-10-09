@@ -1,0 +1,19 @@
+name: Publish to PyPI
+# Runs when a GitHub release is published. Uses PyPI trusted publishing, which needs a
+# one-time setup on pypi.org: add this repository and workflow as a trusted publisher
+# for the rdf-kg-mcp project, with the environment name "pypi".
+on:
+  release:
+    types: [published]
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv build
+      - run: uv publish --trusted-publishing always
