@@ -31,7 +31,16 @@ def test_manifest_command_writes_hashes_and_roles(bundle_dir: Path, tmp_path: Pa
     target.mkdir()
     shutil.copy(bundle_dir / "asserted.nq", target / "asserted.nq")
     code = main(
-        ["manifest", str(target), "--dataset", "pets", "--version", "1", "--graph", "asserted=https://e.org/g"]
+        [
+            "manifest",
+            str(target),
+            "--dataset",
+            "pets",
+            "--version",
+            "1",
+            "--graph",
+            "asserted=https://e.org/g",
+        ]
     )
     assert code == 0
     manifest = json.loads((target / "manifest.json").read_text())
