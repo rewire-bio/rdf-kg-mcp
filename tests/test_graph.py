@@ -14,8 +14,12 @@ def test_info_reports_graph_roles_and_sizes(kg: KnowledgeGraph) -> None:
     info = kg.info()
     assert info["dataset"] == "pets" and info["version"] == "2026-01-01"
     roles = {g["role"]: g["statements"] for g in info["graphs"]}
-    assert roles == {"asserted": 73, "inferred": 34, "ontology": roles["ontology"]}
+    assert roles == {"asserted": 73, "inferred": 34, "derived": 4, "ontology": roles["ontology"]}
+    descriptions = {g["role"]: g.get("description") for g in info["graphs"]}
+    assert descriptions["derived"] == "Findings computed from the other graphs."
+    assert descriptions["asserted"] == "Source facts."
     assert info["example_queries"] == ["Dogs and owners"]
+    assert info["queries"] == ["owner_of", "dogs_named", "findings"]
     assert info["prefixes"]["ex"] == EX
 
 
@@ -67,7 +71,9 @@ def test_describe_resource_marks_asserted_and_inferred(kg: KnowledgeGraph) -> No
             "subject": "id:alice",
             "graphs": ["inferred"],
             "subject_label": "Alice Smith",
-        }
+        },
+        # A declared role other than asserted, inferred and ontology comes after inferred.
+        {"predicate": "ex:about", "subject": "id:finding1", "graphs": ["derived"]},
     ]
 
 

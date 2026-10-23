@@ -66,6 +66,56 @@ def test_invalid_manifests_are_rejected(fresh_bundle_dir: Path, change, message:
     assert len(problems) == 1 and problems[0].startswith("Invalid manifest") and message in problems[0]
 
 
+@pytest.mark.parametrize(
+    "change, message",
+    [
+        (lambda m: m["queries"][0]["params"][0].update(type="date"), "queries/0/params/0/type"),
+        (lambda m: m["queries"][0].update(name="has space"), "queries/0/name"),
+        (lambda m: m["queries"][0].pop("sparql"), "'sparql' is a required property"),
+    ],
+)
+def test_invalid_queries_are_rejected_by_the_schema(fresh_bundle_dir: Path, change, message: str) -> None:
+    manifest = json.loads((fresh_bundle_dir / "manifest.json").read_text())
+    change(manifest)
+    (fresh_bundle_dir / "manifest.json").write_text(json.dumps(manifest))
+    problems = verify(fresh_bundle_dir)
+    assert len(problems) == 1 and problems[0].startswith("Invalid manifest") and message in problems[0]
+
+
+@pytest.mark.parametrize(
+    "change, message",
+    [
+        (lambda m: m["queries"].append(dict(m["queries"][0])), "queries/owner_of: duplicate query name"),
+        (lambda m: m["queries"][0].update(sparql="DELETE WHERE { $pet ?p ?o }"), "read-only"),
+        (
+            lambda m: m["queries"][0].update(sparql="SELECT ?o WHERE { ?pet ex:ownedBy ?o }"),
+            "parameter pet is not used as $pet",
+        ),
+        (
+            lambda m: m["queries"][1]["params"][1].update(default="3"),
+            "default for limit is not of type integer",
+        ),
+    ],
+)
+def test_query_problems_are_reported(fresh_bundle_dir: Path, change, message: str) -> None:
+    manifest = json.loads((fresh_bundle_dir / "manifest.json").read_text())
+    change(manifest)
+    (fresh_bundle_dir / "manifest.json").write_text(json.dumps(manifest))
+    problems = verify(fresh_bundle_dir)
+    assert len(problems) == 1 and message in problems[0], problems
+
+
+def test_manifest_without_new_fields_still_opens(fresh_bundle_dir: Path) -> None:
+    manifest = json.loads((fresh_bundle_dir / "manifest.json").read_text())
+    for field in ("queries", "graph_descriptions"):
+        manifest.pop(field)
+    manifest["graphs"].pop("derived")
+    (fresh_bundle_dir / "manifest.json").write_text(json.dumps(manifest))
+    bundle = open_bundle(str(fresh_bundle_dir))
+    assert bundle.queries == []
+    assert set(bundle.graph_descriptions) == {"asserted", "inferred", "ontology"}
+
+
 def test_write_manifest_keeps_other_fields(fresh_bundle_dir: Path) -> None:
     manifest = json.loads((fresh_bundle_dir / "manifest.json").read_text())
     result = write_manifest(fresh_bundle_dir, manifest)
@@ -77,7 +127,13 @@ def test_pack_is_reproducible_and_opens(bundle_dir: Path, tmp_path: Path) -> Non
     second = pack(bundle_dir, tmp_path / "b.tar.gz")
     assert first == second
     with tarfile.open(tmp_path / "a.tar.gz") as tar:
-        assert tar.getnames() == ["manifest.json", "asserted.nq", "inferred.nq", "ontology/pets.ttl"]
+        assert tar.getnames() == [
+            "manifest.json",
+            "asserted.nq",
+            "derived.nq",
+            "inferred.nq",
+            "ontology/pets.ttl",
+        ]
     opened = open_bundle(str(tmp_path / "a.tar.gz"), tmp_path / "cache")
     assert opened.dataset == "pets" and opened.root.parent == tmp_path / "cache"
 

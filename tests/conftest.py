@@ -13,6 +13,33 @@ ID = "https://example.org/id/"
 ASSERTED = "https://example.org/graph/asserted"
 INFERRED = "https://example.org/graph/inferred"
 ONTOLOGY = "https://example.org/graph/ontology"
+DERIVED = "https://example.org/graph/derived"
+QUERIES = [
+    {
+        "name": "owner_of",
+        "title": "Owner of a pet",
+        "description": "Who owns the given pet.",
+        "sparql": "SELECT ?owner WHERE { $pet ex:ownedBy ?owner }",
+        "params": [{"name": "pet", "type": "iri", "required": True, "description": "The pet."}],
+    },
+    {
+        "name": "dogs_named",
+        "title": "Dogs whose label contains some text",
+        "sparql": "SELECT ?dog ?label WHERE { ?dog a ex:Dog ; rdfs:label ?label "
+        "FILTER(CONTAINS(?label, $text)) } ORDER BY ?dog LIMIT $limit",
+        "params": [
+            {"name": "text", "type": "string", "required": True},
+            {"name": "limit", "type": "integer", "default": 3},
+        ],
+    },
+    {
+        "name": "findings",
+        "title": "Findings, optionally about one resource",
+        "sparql": "SELECT ?finding ?about WHERE { GRAPH <https://example.org/graph/derived> "
+        "{ ?finding ex:about ?about } FILTER(COALESCE(?about = $about, true)) } ORDER BY ?finding",
+        "params": [{"name": "about", "type": "iri"}],
+    },
+]
 
 ONTOLOGY_TTL = """\
 @prefix ex: <https://example.org/vocab#> .
@@ -80,10 +107,27 @@ def _inferred() -> list[str]:
     return sorted(lines)
 
 
+def _derived() -> list[str]:
+    g = DERIVED
+    return sorted(
+        [
+            _quad(
+                f"<{ID}finding1>", "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>", f"<{EX}Finding>", g
+            ),
+            _quad(f"<{ID}finding1>", f"<{EX}about>", f"<{ID}rex>", g),
+            _quad(
+                f"<{ID}finding2>", "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>", f"<{EX}Finding>", g
+            ),
+            _quad(f"<{ID}finding2>", f"<{EX}about>", f"<{ID}alice>", g),
+        ]
+    )
+
+
 def make_bundle(root: Path) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     (root / "asserted.nq").write_text("\n".join(_asserted()) + "\n")
     (root / "inferred.nq").write_text("\n".join(_inferred()) + "\n")
+    (root / "derived.nq").write_text("\n".join(_derived()) + "\n")
     (root / "ontology").mkdir(exist_ok=True)
     (root / "ontology" / "pets.ttl").write_text(ONTOLOGY_TTL)
     write_manifest(
@@ -93,13 +137,15 @@ def make_bundle(root: Path) -> Path:
             "version": "2026-01-01",
             "description": "A tiny test dataset.",
             "license": "CC0-1.0",
-            "graphs": {"asserted": ASSERTED, "inferred": INFERRED, "ontology": ONTOLOGY},
+            "graphs": {"asserted": ASSERTED, "inferred": INFERRED, "ontology": ONTOLOGY, "derived": DERIVED},
+            "graph_descriptions": {"derived": "Findings computed from the other graphs."},
             "prefixes": {"ex": EX, "id": ID},
             "files": {"ontology/pets.ttl": {"graph": ONTOLOGY}},
             "inferred": {"reasoner": {"name": "hand-written", "profile": "OWL 2 RL"}},
             "example_queries": [
                 {"title": "Dogs and owners", "query": "SELECT ?dog ?owner WHERE { ?dog ex:ownedBy ?owner }"}
             ],
+            "queries": QUERIES,
         },
     )
     return root
