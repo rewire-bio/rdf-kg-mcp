@@ -100,7 +100,7 @@ Parameters appear in the query text as `$name`. The server checks each value aga
 | `string` | Any text | An escaped string literal |
 | `integer` | A whole number, or a string of digits | Bare digits, so it also works in `LIMIT` |
 
-Values are never copied into the query text as given. An optional parameter with no value and no default is left as an unbound variable. The bound query is checked again for updates and `SERVICE`, then runs with the same timeout and row cap as `sparql_query`. The result includes the SPARQL that ran.
+Values never enter the query text without validation. An optional parameter with no value and no default is left as an unbound variable. The bound query is checked again for updates and `SERVICE`, then runs with the same timeout and row cap as `sparql_query`. The result includes the SPARQL that ran.
 
 ## Command line
 
