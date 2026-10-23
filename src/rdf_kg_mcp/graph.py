@@ -197,7 +197,11 @@ class KnowledgeGraph:
         graphs = []
         for graph in sorted(self.store.named_graphs(), key=lambda g: g.value):
             count = sum(1 for _ in self.store.quads_for_pattern(None, None, None, graph))
-            graphs.append({"iri": graph.value, "role": self.role(graph), "statements": count})
+            role = self.role(graph)
+            entry = {"iri": graph.value, "role": role, "statements": count}
+            if description := self.bundle.graph_descriptions.get(role):
+                entry["description"] = description
+            graphs.append(entry)
         default_count = sum(1 for _ in self.store.quads_for_pattern(None, None, None, ox.DefaultGraph()))
         if default_count:
             graphs.append({"iri": None, "role": "default", "statements": default_count})
@@ -215,6 +219,7 @@ class KnowledgeGraph:
             "inferred": m.get("inferred"),
             "shacl": m.get("shacl"),
             "example_queries": [q["title"] for q in self.bundle.example_queries],
+            "queries": [q.name for q in self.bundle.queries],
         }
 
     @cached_property
@@ -345,7 +350,7 @@ class KnowledgeGraph:
             "properties": compact_properties,
             "properties_total": len(properties),
             "note": "Counts cover data graphs (not the ontology graph). by_graph splits property statements "
-            "into asserted and inferred.",
+            "by graph role (asserted, inferred and any other declared roles).",
         }
 
     def find_entity(self, text: str, type: str | None = None, limit: int = 20) -> dict[str, Any]:
@@ -428,8 +433,11 @@ class KnowledgeGraph:
             key = (quad.predicate.value, self.term(node))
             merged[key].add(self.role(quad.graph_name))
             nodes[key] = node
-        role_order = {"asserted": 0, "default": 1, "inferred": 2, "ontology": 3}
-        keys = sorted(merged, key=lambda k: (min(role_order.get(r, 4) for r in merged[k]), k))
+        # Asserted facts first and ontology last; other declared roles keep manifest order.
+        fixed = ("asserted", "default", "inferred", "other", "ontology")
+        roles = [*fixed[:3], *(r for r in self.bundle.graphs if r not in fixed), *fixed[3:]]
+        role_order = {role: i for i, role in enumerate(roles)}
+        keys = sorted(merged, key=lambda k: (min(role_order[r] for r in merged[k]), k))
         page = keys[offset : offset + max(0, limit)]
         edges = []
         for key in page:

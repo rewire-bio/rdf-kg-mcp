@@ -31,8 +31,13 @@
     },
     "graphs": {
       "type": "object",
-      "description": "Role name to named-graph IRI. Roles with meaning to the server: asserted, inferred, ontology.",
+      "description": "Role name to named-graph IRI. Roles with meaning to the server: asserted, inferred, ontology. Any other role, such as derived, can be declared and used in the graphs argument of sparql_query.",
       "additionalProperties": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9+.-]*:" }
+    },
+    "graph_descriptions": {
+      "type": "object",
+      "description": "Role name to a short description of what the graph holds. Shown to clients. Defaults exist for asserted, inferred and ontology.",
+      "additionalProperties": { "type": "string" }
     },
     "prefixes": {
       "type": "object",
@@ -53,6 +58,36 @@
           "description": { "type": "string" },
           "query": { "type": "string" }
         }
+      }
+    },
+    "queries": {
+      "type": "array",
+      "description": "Named, parameterised SPARQL queries, run with list_queries and run_query. Parameters appear in the query as $name.",
+      "items": {
+        "type": "object",
+        "required": ["name", "title", "sparql"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+          "title": { "type": "string", "minLength": 1 },
+          "description": { "type": "string" },
+          "sparql": { "type": "string", "minLength": 1 },
+          "params": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "type"],
+              "properties": {
+                "name": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+                "description": { "type": "string" },
+                "type": { "enum": ["iri", "string", "integer"] },
+                "required": { "type": "boolean" },
+                "default": { "type": ["string", "integer"] }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
       }
     },
     "inferred": { "type": ["object", "null"] },

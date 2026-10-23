@@ -45,6 +45,12 @@ DEFAULT_LABEL_PREDICATES = [
     "http://purl.org/dc/terms/title",
 ]
 ARCHIVE_SUFFIXES = (".tar.gz", ".tgz")
+DEFAULT_GRAPH_DESCRIPTIONS = {
+    "asserted": "Source facts.",
+    "inferred": "Facts derived from the asserted graph by the ontology when the bundle was built.",
+    "ontology": "The vocabulary and its axioms.",
+}
+PARAM_TYPES = ("iri", "string", "integer")
 
 
 class BundleError(Exception):
@@ -66,6 +72,36 @@ class FileEntry:
     @property
     def has_quads(self) -> bool:
         return PurePosixPath(self.path).suffix in QUAD_SUFFIXES
+
+
+@dataclass(frozen=True)
+class QueryParam:
+    name: str
+    type: str
+    description: str = ""
+    required: bool = False
+    default: str | int | None = None
+
+
+@dataclass(frozen=True)
+class NamedQuery:
+    name: str
+    title: str
+    sparql: str
+    description: str = ""
+    params: tuple[QueryParam, ...] = ()
+
+    def summary(self) -> dict[str, Any]:
+        """What list_queries shows for this query."""
+        return {
+            "name": self.name,
+            "title": self.title,
+            "description": self.description,
+            "params": [
+                {k: v for k, v in vars(p).items() if not (k == "default" and v is None)} for p in self.params
+            ],
+            "sparql": self.sparql,
+        }
 
 
 @dataclass(frozen=True)
@@ -94,6 +130,18 @@ class Bundle:
         return dict(self.manifest.get("graphs") or {})
 
     @property
+    def graph_descriptions(self) -> dict[str, str]:
+        """What each declared graph role holds: from the manifest, else the defaults for
+        asserted, inferred and ontology."""
+        given = self.manifest.get("graph_descriptions") or {}
+        descriptions = {}
+        for role in self.graphs:
+            text = given.get(role) or DEFAULT_GRAPH_DESCRIPTIONS.get(role)
+            if text:
+                descriptions[role] = text
+        return descriptions
+
+    @property
     def prefixes(self) -> dict[str, str]:
         return dict(self.manifest.get("prefixes") or {})
 
@@ -105,6 +153,28 @@ class Bundle:
     @property
     def example_queries(self) -> list[dict[str, str]]:
         return list(self.manifest.get("example_queries") or [])
+
+    @property
+    def queries(self) -> list[NamedQuery]:
+        return [
+            NamedQuery(
+                name=q["name"],
+                title=q["title"],
+                sparql=q["sparql"],
+                description=q.get("description", ""),
+                params=tuple(
+                    QueryParam(
+                        name=p["name"],
+                        type=p["type"],
+                        description=p.get("description", ""),
+                        required=p.get("required", False),
+                        default=p.get("default"),
+                    )
+                    for p in q.get("params") or []
+                ),
+            )
+            for q in self.manifest.get("queries") or []
+        ]
 
     def role_of(self, graph: str | None) -> str:
         """Role of a named graph ("asserted", "inferred", ...); "default" for the default graph."""
@@ -279,6 +349,37 @@ def verify(root: Path, *, count: bool = False) -> list[str]:
                 continue
             if found != expected:
                 problems.append(f"{path}: {found} statements, manifest says {expected}")
+    problems.extend(_query_problems(manifest))
+    return problems
+
+
+def _query_problems(manifest: dict[str, Any]) -> list[str]:
+    from .query import QueryError, check_query, placeholders
+
+    problems: list[str] = []
+    seen: set[str] = set()
+    for query in manifest.get("queries") or []:
+        name = query["name"]
+        if name in seen:
+            problems.append(f"queries/{name}: duplicate query name")
+        seen.add(name)
+        try:
+            check_query(query["sparql"])
+        except QueryError as error:
+            problems.append(f"queries/{name}: {error}")
+        used = placeholders(query["sparql"])
+        params: set[str] = set()
+        for param in query.get("params") or []:
+            pname = param["name"]
+            if pname in params:
+                problems.append(f"queries/{name}: duplicate parameter {pname}")
+            params.add(pname)
+            if pname not in used:
+                problems.append(f"queries/{name}: parameter {pname} is not used as ${pname} in the query")
+            default = param.get("default")
+            expected = int if param["type"] == "integer" else str
+            if default is not None and (type(default) is not expected):
+                problems.append(f"queries/{name}: default for {pname} is not of type {param['type']}")
     return problems
 
 

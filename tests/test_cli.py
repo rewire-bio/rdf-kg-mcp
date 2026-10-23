@@ -14,7 +14,7 @@ from rdf_kg_mcp.cli import main
 
 def test_verify_ok_and_json(bundle_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["verify", str(bundle_dir)]) == 0
-    assert capsys.readouterr().out.startswith("OK: pets 2026-01-01 (3 files)")
+    assert capsys.readouterr().out.startswith("OK: pets 2026-01-01 (4 files)")
     assert main(["verify", "--json", str(bundle_dir)]) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["valid"] is True and report["problems"] == []

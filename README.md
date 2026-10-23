@@ -9,6 +9,26 @@ The graph is a **bundle**: a manifest plus RDF files, with a SHA-256 checksum fo
 - Pinned versions: the server refuses a bundle whose files do not match the manifest.
 - Works with any RDF dataset. Nothing in the server is specific to one domain.
 
+```mermaid
+flowchart LR
+  subgraph bundle["Bundle"]
+    manifest["manifest.json<br/>graph roles, prefixes,<br/>named queries, SHA-256 per file"]
+    files["N-Quads and Turtle files"]
+  end
+  verify["verify<br/>schema, checksums"]
+  subgraph store["Oxigraph store (read-only)"]
+    asserted["asserted"]
+    inferred["inferred"]
+    ontology["ontology"]
+    derived["derived or any other declared role"]
+  end
+  tools["MCP tools<br/>dataset_info, describe_schema,<br/>find_entity, describe_resource,<br/>sparql_query, list_queries, run_query"]
+  manifest --> verify
+  files --> verify
+  verify --> store
+  store --> tools
+```
+
 ## Quick start
 
 ```sh
@@ -47,10 +67,40 @@ For Claude Desktop or another client, add a server entry that runs the same comm
 | `find_entity` | Resources whose label matches some text, ranked exact, prefix, word, then substring; optionally limited to a class (inferred types count) |
 | `describe_resource` | Every statement about one IRI, outgoing and incoming, each marked asserted, inferred or ontology; paginated |
 | `sparql_query` | A read-only SPARQL 1.1 query (SELECT, ASK, CONSTRUCT, DESCRIBE) with a row cap and a timeout |
+| `list_queries` | The bundle's named queries: name, title, description, parameters and SPARQL text |
+| `run_query` | One named query with its parameters bound, under the same rules as `sparql_query` |
 
-The server also offers the manifest and schema as resources (`kg://manifest`, `kg://schema`) and the bundle's example queries as a prompt.
+The server also offers the manifest and schema as resources (`kg://manifest`, `kg://schema`) and the bundle's example and named queries as a prompt.
 
-By default `sparql_query` treats the union of all graphs as the default graph, so inferred facts are included. Pass `graphs: ["asserted"]` (role names or graph IRIs) to query only those graphs. The bundle's prefixes are predeclared, so queries can use them without `PREFIX` lines.
+By default `sparql_query` treats the union of all graphs as the default graph, so inferred facts are included. The bundle's prefixes are predeclared, so queries can use them without `PREFIX` lines.
+
+### Named graphs
+
+The manifest maps role names to named-graph IRIs. `asserted`, `inferred` and `ontology` have a fixed meaning to the server. A bundle can declare other roles too, such as `derived` for findings computed from the data. Every declared role:
+
+- is listed by `dataset_info` with its size and description;
+- labels statements in `describe_resource`;
+- can be passed to `sparql_query`, for example `graphs: ["derived"]` or `graphs: ["asserted", "inferred"]`. Graph IRIs work too.
+
+An unknown role name is refused with the list of roles the bundle declares.
+
+### Named queries
+
+A bundle can ship parameterised SPARQL queries in its manifest, so clients can ask the questions the dataset was built to answer without writing SPARQL. `list_queries` shows them and `run_query` runs one:
+
+```json
+{ "name": "owner_of", "params": { "pet": "id:rex" }, "max_rows": 100 }
+```
+
+Parameters appear in the query text as `$name`. The server checks each value against its declared type before it goes into the query:
+
+| Type | Accepts | Written into the query as |
+| --- | --- | --- |
+| `iri` | A full IRI, `<IRI>` or a prefixed name | `<https://...>`, after IRI validation |
+| `string` | Any text | An escaped string literal |
+| `integer` | A whole number, or a string of digits | Bare digits, so it also works in `LIMIT` |
+
+Values are never copied into the query text as given. An optional parameter with no value and no default is left as an unbound variable. The bound query is checked again for updates and `SERVICE`, then runs with the same timeout and row cap as `sparql_query`. The result includes the SPARQL that ran.
 
 ## Command line
 

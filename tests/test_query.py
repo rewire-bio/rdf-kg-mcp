@@ -4,9 +4,17 @@ import time
 
 import pytest
 
-from rdf_kg_mcp.bundle import Bundle
-from rdf_kg_mcp.graph import KnowledgeGraph
-from rdf_kg_mcp.query import QueryError, QueryRunner, QueryTimeout, check_query, run_query
+from rdf_kg_mcp.bundle import Bundle, NamedQuery
+from rdf_kg_mcp.graph import GraphError, KnowledgeGraph
+from rdf_kg_mcp.query import (
+    QueryError,
+    QueryRunner,
+    QueryTimeout,
+    bind_params,
+    check_query,
+    placeholders,
+    run_query,
+)
 
 SLOW = "SELECT (COUNT(*) AS ?n) WHERE { ?a ?b ?c . ?d ?e ?f . ?g ?h ?i . ?j ?k ?l . ?m ?n2 ?o }"
 
@@ -56,6 +64,17 @@ def test_graph_restriction_by_role(kg: KnowledgeGraph) -> None:
     assert both["rows"] == [{"x": "id:alice"}]
 
 
+def test_graph_restriction_by_declared_role(kg: KnowledgeGraph) -> None:
+    result = run_query(kg, "SELECT ?f WHERE { ?f a ex:Finding } ORDER BY ?f", 10, graphs=["derived"])
+    assert result["rows"] == [{"f": "id:finding1"}, {"f": "id:finding2"}]
+    assert run_query(kg, "SELECT ?f WHERE { ?f a ex:Finding }", 10, graphs=["asserted"])["rows"] == []
+
+
+def test_unknown_graph_role_lists_the_roles(kg: KnowledgeGraph) -> None:
+    with pytest.raises(GraphError, match="Roles in this bundle: asserted, inferred, ontology, derived"):
+        run_query(kg, "ASK { ?s ?p ?o }", 1, graphs=["nope"])
+
+
 def test_row_cap_truncates(kg: KnowledgeGraph) -> None:
     result = run_query(kg, "SELECT ?x WHERE { ?x a ex:Dog }", 10)
     assert len(result["rows"]) == 10 and result["truncated"] is True
@@ -96,3 +115,81 @@ def test_runner_stops_slow_queries_and_recovers(bundle: Bundle) -> None:
             runner.run("INSERT DATA { <a:b> <a:b> <a:b> }", 5)
     finally:
         runner.close()
+
+
+def named(kg: KnowledgeGraph, name: str) -> NamedQuery:
+    return next(q for q in kg.bundle.queries if q.name == name)
+
+
+def test_placeholders_skip_strings_iris_and_comments() -> None:
+    sparql = 'SELECT * WHERE { ?s ?p "$a" ; <https://x.org/$b> $c ; ?q $cd } # $e\nLIMIT $f'
+    assert placeholders(sparql) == {"c", "cd", "f"}
+
+
+def test_bind_params_writes_terms(kg: KnowledgeGraph) -> None:
+    sparql = bind_params(kg, named(kg, "owner_of"), {"pet": "id:rex"})
+    assert sparql == "SELECT ?owner WHERE { <https://example.org/id/rex> ex:ownedBy ?owner }"
+    result = run_query(kg, sparql, 10)
+    assert result["rows"] == [{"owner": "id:alice"}]
+    same = bind_params(kg, named(kg, "owner_of"), {"pet": "<https://example.org/id/rex>"})
+    assert same == sparql
+
+
+def test_bind_params_defaults_and_integers(kg: KnowledgeGraph) -> None:
+    query = named(kg, "dogs_named")
+    assert len(run_query(kg, bind_params(kg, query, {"text": "Dog 1"}), 100)["rows"]) == 3
+    for limit in (5, "5"):
+        rows = run_query(kg, bind_params(kg, query, {"text": "Dog 1", "limit": limit}), 100)["rows"]
+        assert [r["label"] for r in rows] == ['"Dog 10"', '"Dog 11"', '"Dog 12"', '"Dog 13"', '"Dog 14"']
+
+
+def test_optional_param_without_value_stays_unbound(kg: KnowledgeGraph) -> None:
+    query = named(kg, "findings")
+    everything = run_query(kg, bind_params(kg, query, {}), 10)["rows"]
+    assert [r["finding"] for r in everything] == ["id:finding1", "id:finding2"]
+    about_rex = run_query(kg, bind_params(kg, query, {"about": "id:rex"}), 10)["rows"]
+    assert about_rex == [{"finding": "id:finding1", "about": "id:rex"}]
+
+
+def test_string_params_are_escaped(kg: KnowledgeGraph) -> None:
+    query = named(kg, "dogs_named")
+    attack = '") } } INSERT DATA { <a:b> <a:b> <a:b> } #'
+    sparql = bind_params(kg, query, {"text": attack + "\\ and a\nnewline"})
+    assert "INSERT DATA" in sparql  # only inside the literal
+    assert run_query(kg, sparql, 10)["rows"] == []
+    assert placeholders(sparql) == set()
+
+
+@pytest.mark.parametrize(
+    "params, message",
+    [
+        ({"pet": "https://example.org/id/rex> } ; DROP ALL #"}, "pet"),
+        ({"pet": "https://example.org/id/a b"}, "pet"),
+        ({"pet": "https://example.org/id/x}"}, "pet"),
+        ({"pet": 'https://example.org/id/x"'}, "pet"),
+        ({"pet": "rex"}, "pet"),
+        ({"pet": 42}, "must be an IRI"),
+        ({}, "pet is required"),
+        ({"pet": "id:rex", "other": "x"}, "Unknown parameter"),
+    ],
+)
+def test_bad_iri_params_are_refused(kg: KnowledgeGraph, params: dict, message: str) -> None:
+    with pytest.raises(QueryError, match=message):
+        bind_params(kg, named(kg, "owner_of"), params)
+
+
+@pytest.mark.parametrize("limit", ["1; DELETE WHERE { ?s ?p ?o }", "1.5", True, 1.5, "", " 1", ["1"]])
+def test_bad_integer_params_are_refused(kg: KnowledgeGraph, limit: object) -> None:
+    with pytest.raises(QueryError, match="limit must be an integer"):
+        bind_params(kg, named(kg, "dogs_named"), {"text": "Dog", "limit": limit})
+
+
+def test_string_param_must_be_a_string(kg: KnowledgeGraph) -> None:
+    with pytest.raises(QueryError, match="text must be a string"):
+        bind_params(kg, named(kg, "dogs_named"), {"text": 5})
+
+
+def test_bound_query_is_checked_again(kg: KnowledgeGraph) -> None:
+    update = NamedQuery(name="bad", title="Bad", sparql="DELETE WHERE { ?s ?p ?o }")
+    with pytest.raises(QueryError, match="read-only"):
+        bind_params(kg, update, {})

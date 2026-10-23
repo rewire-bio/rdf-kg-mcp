@@ -17,7 +17,7 @@ from typing import Any
 
 import pyoxigraph as ox
 
-from .bundle import Bundle, open_bundle
+from .bundle import Bundle, NamedQuery, QueryParam, open_bundle
 from .graph import GraphError, KnowledgeGraph, load_store
 
 _STRIP = re.compile(
@@ -29,6 +29,8 @@ _STRIP = re.compile(
     r"|#[^\n]*",  # comment
     re.S,
 )
+_PLACEHOLDER = re.compile(_STRIP.pattern + r"|\$([A-Za-z_][A-Za-z0-9_]*)", re.S)
+_INTEGER = re.compile(r"^[+-]?[0-9]+$")
 _SERVICE = re.compile(r"\bSERVICE\b", re.I)
 _FORM = re.compile(r"\b(SELECT|ASK|CONSTRUCT|DESCRIBE)\b", re.I)
 _UPDATE = re.compile(r"\b(INSERT|DELETE|LOAD|CLEAR|CREATE|DROP|COPY|MOVE|ADD)\b", re.I)
@@ -53,6 +55,57 @@ def check_query(query: str) -> None:
         raise QueryError("Only SELECT, ASK, CONSTRUCT and DESCRIBE queries are allowed.")
 
 
+def placeholders(sparql: str) -> set[str]:
+    """Names written as $name in the query, outside strings, IRIs and comments."""
+    return {m.group(1) for m in _PLACEHOLDER.finditer(sparql) if m.group(1)}
+
+
+def _term(kg: KnowledgeGraph, param: QueryParam, value: Any) -> str:
+    """Validate one parameter value and return it as a SPARQL term."""
+    if param.type == "iri":
+        if not isinstance(value, str):
+            raise QueryError(f"Parameter {param.name} must be an IRI or prefixed name.")
+        try:
+            return str(ox.NamedNode(kg.expand(value)))
+        except ValueError as error:
+            raise QueryError(f"Parameter {param.name}: {error}") from error
+    if param.type == "integer":
+        if isinstance(value, bool) or not isinstance(value, (int, str)) or not _INTEGER.match(str(value)):
+            raise QueryError(f"Parameter {param.name} must be an integer.")
+        return str(int(value))
+    if not isinstance(value, str):
+        raise QueryError(f"Parameter {param.name} must be a string.")
+    return str(ox.Literal(value))
+
+
+def bind_params(kg: KnowledgeGraph, query: NamedQuery, params: dict[str, Any] | None) -> str:
+    """Put validated parameter values into a named query. IRIs become <...>, strings become escaped
+    literals and integers bare digits. An optional parameter with no value and no default stays an
+    unbound variable."""
+    given = dict(params or {})
+    declared = {p.name: p for p in query.params}
+    unknown = sorted(set(given) - set(declared))
+    if unknown:
+        known = ", ".join(declared) or "none"
+        raise QueryError(f"Unknown parameter(s) for {query.name}: {', '.join(unknown)}. Declared: {known}")
+    terms: dict[str, str] = {}
+    for param in query.params:
+        value = given.get(param.name, param.default)
+        if value is None:
+            if param.required:
+                raise QueryError(f"Parameter {param.name} is required for {query.name}.")
+            continue
+        terms[param.name] = _term(kg, param, value)
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        return terms.get(name, match.group(0)) if name else match.group(0)
+
+    bound = _PLACEHOLDER.sub(replace, query.sparql)
+    check_query(bound)
+    return bound
+
+
 def run_query(
     kg: KnowledgeGraph, query: str, max_rows: int, graphs: list[str] | None = None
 ) -> dict[str, Any]:
@@ -62,7 +115,11 @@ def run_query(
     if graphs:
         iris = []
         for name in graphs:
-            iri = kg.bundle.graphs.get(name) or kg.expand(name)
+            iri = kg.bundle.graphs.get(name)
+            if iri is None and ":" not in name:
+                roles = ", ".join(kg.bundle.graphs) or "none"
+                raise GraphError(f"Unknown graph role {name!r}. Roles in this bundle: {roles}")
+            iri = iri or kg.expand(name)
             iris.append(ox.NamedNode(iri))
         options["default_graph"] = iris
     else:
