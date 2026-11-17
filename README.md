@@ -22,7 +22,7 @@ flowchart LR
     ontology["ontology"]
     derived["derived or any other declared role"]
   end
-  tools["MCP tools<br/>dataset_info, describe_schema,<br/>find_entity, describe_resource,<br/>sparql_query, list_queries, run_query"]
+  tools["MCP tools<br/>dataset_info, describe_schema,<br/>search, find_entity, describe_resource,<br/>sparql_query, list_queries, run_query"]
   manifest --> verify
   files --> verify
   verify --> store
@@ -65,6 +65,7 @@ For Claude Desktop or another client, add a server entry that runs the same comm
 | `dataset_info` | Name, version, manifest checksum, named graphs with their roles and sizes, prefixes, how inferences were produced, validation status |
 | `describe_schema` | Classes with instance counts; properties with asserted and inferred counts, labels, definitions, superproperties, inverses, property chains, domains and ranges |
 | `find_entity` | Resources whose label matches some text, ranked exact, prefix, word, then substring; optionally limited to a class (inferred types count) |
+| `search` | Entities ranked by how well some words match their labels, aliases, descriptions and any text predicates the bundle declares; optionally limited to classes (inferred types count) |
 | `describe_resource` | Every statement about one IRI, outgoing and incoming, each marked asserted, inferred or ontology; paginated |
 | `sparql_query` | A read-only SPARQL 1.1 query (SELECT, ASK, CONSTRUCT, DESCRIBE) with a row cap and a timeout |
 | `list_queries` | The bundle's named queries: name, title, description, parameters and SPARQL text |
@@ -73,6 +74,17 @@ For Claude Desktop or another client, add a server entry that runs the same comm
 The server also offers the manifest and schema as resources (`kg://manifest`, `kg://schema`) and the bundle's example and named queries as a prompt.
 
 By default `sparql_query` treats the union of all graphs as the default graph, so inferred facts are included. The bundle's prefixes are predeclared, so queries can use them without `PREFIX` lines.
+
+### Search
+
+`search` is for finding entities by topic when you do not know their names. The index is built once when the server starts, from labels (`label_predicates`, except `skos:altLabel`), aliases (`skos:altLabel`), descriptions (`rdfs:comment`, `skos:definition`, `dcterms:description`, IAO definition) and any `search.text_predicates` the manifest declares. Ontology-graph statements are not indexed.
+
+- Words are case-folded and lightly stemmed, and a word of four or more characters also matches longer words that start with it, so `splice` finds "splicing" and "SpliceAI".
+- Scores follow BM25: rare words count more, and a short label that matches beats a long description that mentions the word. Label matches weigh 3, aliases 2, descriptions and declared text 1.
+- The score is multiplied by a class-rarity prior, so a handful of entities of a rare class rank above thousands of records of a common class that repeat the same word. No class takes more than three of the leading places.
+- `types` keeps only entities with one of the given classes; `limit` and `offset` page through results. Each result lists the fields that matched and its score.
+
+`find_entity` remains the tool for an exact or partial name.
 
 ### Named graphs
 

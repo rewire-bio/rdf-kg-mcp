@@ -151,6 +151,12 @@ class Bundle:
         return [expand_curie(p, self.prefixes) for p in given]
 
     @property
+    def search_text_predicates(self) -> list[str]:
+        """Extra literal predicates indexed by the search tool, beyond labels and descriptions."""
+        given = (self.manifest.get("search") or {}).get("text_predicates") or []
+        return [expand_curie(p, self.prefixes) for p in given]
+
+    @property
     def example_queries(self) -> list[dict[str, str]]:
         return list(self.manifest.get("example_queries") or [])
 

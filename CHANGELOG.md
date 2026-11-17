@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `search` tool: ranks entities by text match over labels, `skos:altLabel` aliases and descriptions, with an optional class filter (inferred types count) and paging. The index is built at start-up. Ranking is BM25-style with light stemming and prefix matching, a class-rarity prior and at most three results per class among the leading places.
+- Optional manifest field `search.text_predicates` names extra literal predicates to index.
+
 ## 0.2.0
 
 ### Added

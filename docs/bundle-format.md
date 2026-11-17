@@ -64,6 +64,7 @@ A bundle is a directory, or a `.tar.gz` of one, containing `manifest.json` and t
 | `graph_descriptions` | No | Role name to a short description of the graph, shown by `dataset_info` and in the server instructions. Defaults exist for `asserted`, `inferred` and `ontology` |
 | `prefixes` | No | Prefix to namespace; used to shorten IRIs in results and predeclared in SPARQL |
 | `label_predicates` | No | Predicates searched by `find_entity` (IRIs or prefixed names). Default: `rdfs:label`, `skos:prefLabel`, `skos:altLabel`, `schema:name`, `dcterms:title` |
+| `search` | No | `{"text_predicates": [...]}`: extra literal predicates indexed by `search`, beyond labels, `skos:altLabel` and descriptions |
 | `example_queries` | No | `{title, query, description}` items offered as a prompt |
 | `queries` | No | Named, parameterised queries served by `list_queries` and `run_query`; see [Named queries](#named-queries) |
 | `inferred`, `shacl` | No | Free-form records of how inferences and validation were produced, shown by `dataset_info` |
