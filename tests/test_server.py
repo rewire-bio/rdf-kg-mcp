@@ -48,6 +48,7 @@ async def test_tools_are_listed_as_read_only(client: Client) -> None:
         "dataset_info",
         "describe_schema",
         "find_entity",
+        "search",
         "describe_resource",
         "sparql_query",
         "list_queries",
@@ -63,6 +64,8 @@ async def test_workflow_from_name_to_inferred_fact(client: Client) -> None:
     assert info["dataset"] == "pets"
     schema = await call(client, "describe_schema")
     assert "ex:petLivesIn" in {p["id"] for p in schema["properties"]}
+    searched = await call(client, "search", text="good dog", types=["ex:Animal"])
+    assert searched["results"][0]["id"] == "id:rex"
     found = await call(client, "find_entity", text="Rex", type="ex:Animal")
     rex = found["results"][0]["id"]
     described = await call(client, "describe_resource", iri=rex, direction="out")

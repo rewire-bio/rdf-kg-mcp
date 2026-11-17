@@ -13,6 +13,7 @@ from typing import Any
 import pyoxigraph as ox
 
 from .bundle import Bundle, expand_curie
+from .search import ALT_LABEL, SearchIndex, words
 
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 RDF_FIRST = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first"
@@ -398,6 +399,57 @@ class KnowledgeGraph:
                     "match": how,
                 }
                 for _, _, label, iri, how in matches[: max(1, limit)]
+            ],
+        }
+
+    @cached_property
+    def search_index(self) -> SearchIndex:
+        """Built once per graph. The server builds it at start-up, before the first call."""
+        labels = [p for p in self.bundle.label_predicates if p != ALT_LABEL]
+        fields = {
+            "label": labels,
+            "alias": [ALT_LABEL],
+            "description": DESCRIPTION_PREDICATES,
+            "text": self.bundle.search_text_predicates,
+        }
+        return SearchIndex.build(
+            {name: self._data_quads(predicates) for name, predicates in fields.items()}, self.types
+        )
+
+    def _data_quads(self, predicates: list[str]) -> Any:
+        for predicate in dict.fromkeys(predicates):
+            for quad in self.store.quads_for_pattern(None, ox.NamedNode(predicate), None):
+                if self._ontology_graph is None or quad.graph_name != self._ontology_graph:
+                    yield quad
+
+    def search(
+        self, text: str, types: list[str] | None = None, limit: int = 20, offset: int = 0
+    ) -> dict[str, Any]:
+        if not words(text):
+            raise GraphError("text must contain at least one letter or digit")
+        type_iris = [self.expand(t) for t in types or []]
+        index = self.search_index
+        scores, matched = index.score(text)
+        if type_iris:
+            wanted = set(type_iris)
+            scores = {iri: s for iri, s in scores.items() if wanted & self.types.get(iri, set())}
+        ranked = index.rank(scores)
+        page = ranked[offset : offset + max(1, limit)]
+        return {
+            "query": text,
+            "types": [self.compact(t) for t in type_iris],
+            "total": len(ranked),
+            "offset": offset,
+            "results": [
+                {
+                    "id": self.compact(iri),
+                    "iri": iri,
+                    "label": self.label(iri),
+                    "types": sorted(self.compact(t) for t in self.types.get(iri, set())),
+                    "score": round(scores[iri], 3),
+                    "matched": sorted(matched[iri]),
+                }
+                for iri in page
             ],
         }
 

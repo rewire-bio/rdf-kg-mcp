@@ -55,7 +55,8 @@ Queries see the union of all graphs unless restricted with the graphs argument, 
 already included.
 
 Suggested order: describe_schema to learn the classes and properties (including inverse properties and
-property chains that produce shortcuts), find_entity to turn names into IRIs, describe_resource to see
+property chains that produce shortcuts), search to find entities by topic words, find_entity to turn a
+known name into an IRI, describe_resource to see
 everything about one IRI, then sparql_query for joins, filters and counts. Prefixes from describe_schema
 are predeclared in SPARQL. Results are capped; add LIMIT and ORDER BY for stable paging.{queries}"""
 
@@ -63,6 +64,7 @@ are predeclared in SPARQL. Results are capped; add LIMIT and ORDER BY for stable
 def build_server(kg: KnowledgeGraph, runner: QueryRunner | None, max_rows: int = 1000) -> MCPServer:
     """Create the server. Without a runner, queries run in-process with no timeout (used in tests)."""
     server = MCPServer(name="rdf-kg-mcp", version=__version__, instructions=instructions(kg))
+    kg.search_index  # noqa: B018 - build the search index at start-up, not on the first call
     queries = {q.name: q for q in kg.bundle.queries}
 
     async def execute(query: str, rows: int, graphs: list[str] | None) -> dict[str, Any]:
@@ -90,6 +92,18 @@ def build_server(kg: KnowledgeGraph, runner: QueryRunner | None, max_rows: int =
         inferred types count. Returns IRIs to use with describe_resource and sparql_query."""
         with caller_errors():
             return kg.find_entity(text, type=type, limit=min(max(1, limit), 200))
+
+    @server.tool(annotations=READ_ONLY)
+    def search(text: str, types: list[str] | None = None, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        """Rank entities by how well text matches their labels, aliases (skos:altLabel) and
+        descriptions (rdfs:comment, skos:definition, dcterms:description, IAO definition), plus any
+        text predicates the bundle declares. Words match whole or as prefixes after light stemming,
+        so "splice" finds "splicing" and "SpliceAI". Entities of rare classes rank above the many
+        records of common classes, and no class fills more than three of the leading places.
+        types restricts results to entities with any of these classes (IRIs or prefixed names;
+        inferred types count). Use offset to page."""
+        with caller_errors():
+            return kg.search(text, types=types, limit=min(max(1, limit), 200), offset=max(0, offset))
 
     @server.tool(annotations=READ_ONLY)
     def describe_resource(
