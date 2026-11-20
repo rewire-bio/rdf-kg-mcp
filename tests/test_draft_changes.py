@@ -274,3 +274,27 @@ def test_draft_records_need_drafts_and_must_exist(
     assert "need --drafts" in capsys.readouterr().err
     assert main(["serve", str(bundle_dir), "--drafts", "--draft-records", "/no/such/file"]) == 2
     assert "not found: /no/such/file" in capsys.readouterr().err
+
+
+def test_a_key_removed_and_set_again_keeps_its_place(overlay: DraftOverlay) -> None:
+    # The same value back: nothing changed, whatever order the changes came in.
+    same = overlay.change(
+        "rex", [{"path": "/props/zeta", "remove": True}, {"path": "/props/zeta", "value": 1}], sha(REX)
+    )
+    assert same["status"] == "unchanged" and same["fields"] == []
+    # A new value through remove and set: the key stays where the committed line has it.
+    moved = overlay.change(
+        "rex",
+        [
+            {"path": "/props/zeta", "remove": True},
+            {"path": "/props/zeta", "value": 2},
+            {"path": "/title", "remove": True},
+            {"path": "/title", "value": "Rex"},
+        ],
+        sha(REX),
+    )
+    assert moved["status"] == "changed"
+    assert [f["path"] for f in moved["fields"]] == ["/props/zeta"]
+    record = json.loads(overlay.export()["changes"])["record"]
+    assert list(record) == ["key", "species", "title", "mood", "props", "related", "seen_in"]
+    assert list(record["props"]) == ["zeta", "alpha", "mid", "colour"]

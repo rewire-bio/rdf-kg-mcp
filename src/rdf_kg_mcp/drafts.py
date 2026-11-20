@@ -310,7 +310,8 @@ def apply_changes(record: dict[str, Any], changes: Any, protected: tuple[str, ..
     """The record with the changes applied, in order. Each change is {"path", "value"} (set) or
     {"path", "remove": true}. Setting an existing key replaces its value where it stands; a new
     key is appended to its object, and missing parent objects are created the same way. Paths go
-    through objects only: a list is replaced whole. Keys in `protected` cannot be changed."""
+    through objects only: a list is replaced whole. Keys in `protected` cannot be changed.
+    The caller puts keys back in the committed order with keep_order."""
     if not isinstance(changes, list) or not changes:
         raise DraftError("changes must be a non-empty list of {path, value} or {path, remove: true}")
     out = copy.deepcopy(record)
@@ -343,6 +344,16 @@ def apply_changes(record: dict[str, Any], changes: Any, protected: tuple[str, ..
         else:
             parent[tokens[-1]] = copy.deepcopy(change["value"])
     return out
+
+
+def keep_order(base: Any, changed: Any) -> Any:
+    """`changed` with the keys of every object that `base` also has in `base`'s order, and keys
+    `base` lacks after them in their own order. A key removed and set again therefore goes back to
+    its place, so only content moves a key, never the order the changes were given in."""
+    if not (isinstance(base, dict) and isinstance(changed, dict)):
+        return changed
+    order = [k for k in base if k in changed] + [k for k in changed if k not in base]
+    return {k: keep_order(base.get(k), changed[k]) for k in order}
 
 
 def field_diff(before: Any, after: Any, path: list[str] | None = None) -> list[dict[str, Any]]:
@@ -746,7 +757,7 @@ class DraftOverlay:
                 "of the parsed record), so a change would also rewrite fields it does not touch."
             )
         current = self.changes.get(record_id) or parsed
-        changed = apply_changes(current, changes, (cfg.id_field, cfg.type_field))
+        changed = keep_order(parsed, apply_changes(current, changes, (cfg.id_field, cfg.type_field)))
         try:
             new_line = _json(changed)
         except ValueError as error:  # NaN or infinity

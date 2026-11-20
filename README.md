@@ -120,7 +120,7 @@ The bundle holds RDF, not the store's JSON, so the overlay has no exact copy of 
 
 - `base_sha256` is the SHA-256 of the record's committed line (UTF-8, without the newline) as the caller read it. Any other value is refused, so a change worked out against an older line cannot overwrite newer data. Calls on one record accumulate, each against the same committed line.
 - `changes` is a list of `{"path": "/attributes/licence", "value": ...}` or `{"path": ..., "remove": true}`, with JSON Pointer paths ([RFC 6901](https://www.rfc-editor.org/rfc/rfc6901)) through objects. A list is replaced whole. The id and kind fields cannot change.
-- The change is applied to the committed line as parsed. Keys it does not touch keep their place at every depth; a changed value stays where it was; a new key goes at the end of its object. Nothing is sorted, so the bytes of the untouched fields are the committed bytes. A committed line this server would not write back byte for byte (`1e-05` where JavaScript writes `0.00001`, say) is refused.
+- The change is applied to the committed line as parsed. Keys it does not touch keep their place at every depth; a changed value stays where it was, also when it was removed and set again; a new key goes at the end of its object. Nothing is sorted, so the bytes of the untouched fields are the committed bytes. A committed line this server would not write back byte for byte (`1e-05` where JavaScript writes `0.00001`, say) is refused.
 - A result equal to the committed line is `unchanged` and is not exported.
 - Problems the change brings in block the export. Problems the committed line already had are listed as warnings.
 
