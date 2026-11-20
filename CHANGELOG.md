@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.1
+
+### Fixed
+
+- A draft whose link target or reference was not usable in an IRI (`"esm 2"`) was stored and then broke `draft_upsert`, `draft_diff` and `draft_export` with a bare "Error executing tool" until it was removed. Such a target is now a listed problem, and a draft id that cannot be part of an IRI is refused with a message before anything is stored.
+- Link targets and references are checked against the id field's schema in `record_schema`. A sub-resource IRI under `iri_base` (`record/missing/field`) is a problem, not a release record of unknown kind.
+- Exported numbers are written as JavaScript's `JSON.stringify` writes them (`0.00002`, not `2e-05`; `1`, not `1.0`), so a batch line is the line a JavaScript store writes and its digest is the record's digest. `1` and `1.0` in a draft are now the same value (`unchanged`).
+- A refused `draft_export` removes `batch.jsonl` and `summary.json` left by an earlier export, and lists them in `removed`. Exported files get the usual mode for the umask (0644 by default), not 0600.
+- Possible duplicates: search hits count only when their label or alias shares at least half the words of one name with the other, so unrelated high-scoring records are no longer listed. Drafts with half their words in common are listed as `near name`.
+- `record_schema` problems are cut to 300 characters.
+- `serve --drafts` on a bundle with no draft block stops before loading the graph.
+
 ## 0.3.0
 
 ### Added

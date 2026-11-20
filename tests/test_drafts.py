@@ -19,7 +19,7 @@ from mcp import Client, StdioServerParameters
 
 from rdf_kg_mcp.bundle import open_bundle, verify, write_manifest
 from rdf_kg_mcp.cli import main
-from rdf_kg_mcp.drafts import DraftConfig, DraftError, DraftOverlay, line
+from rdf_kg_mcp.drafts import DraftConfig, DraftError, DraftOverlay, _umask, js_number, line
 from rdf_kg_mcp.graph import KnowledgeGraph
 from rdf_kg_mcp.server import build_server
 
@@ -181,7 +181,81 @@ def test_numbers_that_json_readers_cannot_carry_are_refused(overlay: DraftOverla
 def test_true_and_one_are_different_values(overlay: DraftOverlay) -> None:
     overlay.upsert(dog("fido", props={"x": 1}))
     assert overlay.upsert(dog("fido", props={"x": True}))["status"] == "replaced"
-    assert overlay.upsert(dog("fido", props={"x": 1.0}))["status"] == "replaced"
+    # 1 and 1.0 are the same JSON number and export as the same bytes.
+    overlay.upsert(dog("fido", props={"x": 1}))
+    assert overlay.upsert(dog("fido", props={"x": 1.0}))["status"] == "unchanged"
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [
+        (2e-05, "0.00002"),
+        (1e-05, "0.00001"),
+        (1e-06, "0.000001"),
+        (1e-07, "1e-7"),
+        (1.5e-07, "1.5e-7"),
+        (1.0, "1"),
+        (-0.0, "0"),
+        (0.1, "0.1"),
+        (-2.5, "-2.5"),
+        (123456.789, "123456.789"),
+        (1e20, "100000000000000000000"),
+        (1e21, "1e+21"),
+        (1.2345678901234568e20, "123456789012345680000"),
+        (2.5e25, "2.5e+25"),
+    ],
+)
+def test_numbers_are_written_as_javascript_writes_them(value: float, text: str) -> None:
+    assert js_number(value) == text
+
+
+def test_export_lines_are_store_lines(overlay: DraftOverlay) -> None:
+    record = dog("fido", props={"learning_rate": 2e-05, "epochs": 3, "ratio": 1.0, "big": 1e21})
+    overlay.upsert(record)
+    batch_line = overlay.export()["batch"].strip()
+    assert '"big":1e+21' in batch_line and '"epochs":3' in batch_line
+    assert '"learning_rate":0.00002' in batch_line and '"ratio":1' in batch_line
+    # Read back and written again (what a JavaScript import does), the bytes do not change.
+    assert line(json.loads(batch_line), overlay.config) == batch_line
+
+
+def test_ids_that_cannot_be_records_are_problems_not_crashes(overlay: DraftOverlay) -> None:
+    bad = overlay.upsert(dog("fido", related=[{"rel": "friend_of", "to": "esm 2"}], seen_in=["a b"]))
+    assert bad["status"] == "added"
+    assert bad["problems"] == [
+        "related[0]: 'esm 2' cannot be part of an IRI",
+        "seen_in[0]: 'a b' cannot be part of an IRI",
+    ]
+    # A sub-resource of a record is an IRI, but not a record id.
+    sub = overlay.upsert(dog("fido", related=[{"rel": "friend_of", "to": "rex/missing/owner"}]))
+    assert sub["problems"] == [
+        "related[0]: 'rex/missing/owner' is not a valid key: 'rex/missing/owner' does not match "
+        "'^[a-z0-9]+(?:-[a-z0-9]+)*$'"
+    ]
+    # The overlay stays usable: diff and export report the problem instead of failing.
+    assert overlay.diff()["problems"] == 1
+    assert overlay.export()["exported"] is False
+    with pytest.raises(DraftError, match="cannot be part of an IRI"):
+        overlay.upsert(dog("a b>c"))
+    assert "a b>c" not in overlay.records
+
+
+def test_long_validator_messages_are_cut(overlay: DraftOverlay) -> None:
+    config = DraftConfig.load(
+        {
+            **DRAFT_BLOCK,
+            "record_schema": {
+                **DRAFT_BLOCK["record_schema"],
+                "properties": {
+                    **DRAFT_BLOCK["record_schema"]["properties"],
+                    "mood": {"enum": [f"mood-{i}" for i in range(500)]},
+                },
+            },
+        },
+        overlay.kg,
+    )
+    problems = DraftOverlay(overlay.kg, config).upsert(dog("fido", mood="x"))["problems"]
+    assert len(problems) == 1 and len(problems[0]) < 320 and problems[0].endswith(" ...")
 
 
 def test_possible_duplicates(overlay: DraftOverlay) -> None:
@@ -193,6 +267,19 @@ def test_possible_duplicates(overlay: DraftOverlay) -> None:
     other = overlay.upsert(dog("pupper", title="dog 01"))["possible_duplicates"]
     assert {"id": "bob", "in": "draft", "kind": "person", "label": "Dog-01", "match": "same name"} in other
     assert any(d["id"] == "dog01" and d["match"] == "same name, search" for d in other)
+
+
+def test_unrelated_search_hits_are_not_duplicates(overlay: DraftOverlay) -> None:
+    # Search finds rex on its description ("Good dog"), which says nothing about its name.
+    assert overlay.kg.search("Good small pup", types=["ex:Dog"])["results"][0]["iri"] == ID + "rex"
+    assert overlay.upsert(dog("pup", title="Good small pup"))["possible_duplicates"] == []
+    found = overlay.upsert(dog("zz", title="Fakeformer RV330 small"))["possible_duplicates"]
+    assert found == []
+    near = overlay.upsert(dog("zz2", title="Fakeformer RV330"))["possible_duplicates"]
+    assert near == [
+        {"id": "zz", "in": "draft", "kind": "dog", "label": "Fakeformer RV330 small", "match": "near name"}
+    ]
+    assert not overlay.upsert(dog("zz3", title="Bulldog"))["possible_duplicates"]
 
 
 def test_export_bytes_are_deterministic(overlay: DraftOverlay, kg: KnowledgeGraph, tmp_path: Path) -> None:
@@ -209,7 +296,7 @@ def test_export_bytes_are_deterministic(overlay: DraftOverlay, kg: KnowledgeGrap
     # Keys sorted at every depth inside props, in UTF-16 order (the emoji's surrogates sort first).
     assert list(fido["props"]) == ["a", "b", "\U0001f600", "￿"]
     assert list(fido["props"]["b"]["a"][0]) == ["x", "y"]
-    assert batch.decode().splitlines()[1].count('"a":1e-05') == 1
+    assert batch.decode().splitlines()[1].count('"a":0.00001') == 1
     # Links sorted by relation then target; other lists keep the caller's order.
     assert fido["related"] == [{"rel": "friend_of", "to": "rex"}, {"rel": "owned_by", "to": "alice"}]
     assert fido["seen_in"] == ["finding2", "finding1"]
@@ -241,6 +328,19 @@ def test_export_is_refused_while_drafts_have_problems(overlay: DraftOverlay, tmp
     result = overlay.export()
     assert result["exported"] is False and list(result["problems"]) == ["fido"]
     assert not (tmp_path / "out").exists()
+
+
+def test_a_refused_export_leaves_no_earlier_batch(overlay: DraftOverlay, tmp_path: Path) -> None:
+    overlay.upsert(dog("fido"))
+    assert overlay.export()["exported"] is True
+    batch = tmp_path / "out" / "batch.jsonl"
+    # Readable by others as a plain open() would leave it, not the owner-only mode of mkstemp.
+    assert batch.stat().st_mode & 0o777 == 0o666 & ~_umask()
+    overlay.upsert(dog("Bad_ID"))
+    refused = overlay.export()
+    assert refused["exported"] is False
+    assert not batch.exists() and not (tmp_path / "out" / "summary.json").exists()
+    assert sorted(refused["removed"]) == sorted([str(batch), str(tmp_path / "out" / "summary.json")])
 
 
 def test_without_a_draft_dir_nothing_is_written(kg: KnowledgeGraph) -> None:
@@ -296,6 +396,13 @@ async def test_draft_tools_over_mcp(draft_client: Client, tmp_path: Path) -> Non
     assert result.structured_content and result.structured_content["status"] == "added"
     refused = await draft_client.call_tool("draft_upsert", {"record": dog("rex")})
     assert refused.is_error and "already in release" in refused.content[0].text  # type: ignore[union-attr]
+    bad_id = await draft_client.call_tool("draft_upsert", {"record": dog("a b>c")})
+    assert bad_id.is_error and "cannot be part of an IRI" in bad_id.content[0].text  # type: ignore[union-attr]
+    bad_target = await draft_client.call_tool(
+        "draft_upsert", {"record": dog("spot", related=[{"rel": "friend_of", "to": "esm 2"}])}
+    )
+    assert bad_target.structured_content and bad_target.structured_content["problems"]
+    await draft_client.call_tool("draft_remove", {"id": "spot"})
     diff = await draft_client.call_tool("draft_diff", {})
     assert diff.structured_content and [e["id"] for e in diff.structured_content["added"]] == ["fido"]
     exported = await draft_client.call_tool("draft_export", {})
@@ -319,7 +426,13 @@ def test_drafts_are_refused_over_http(bundle_dir: Path, capsys: pytest.CaptureFi
     assert main(["serve", str(bundle_dir), "--draft-dir", "x"]) == 2
 
 
-def test_drafts_need_a_draft_block(bundle_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_drafts_need_a_draft_block(
+    bundle_dir: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_load(*args: Any) -> None:
+        raise AssertionError("the store was loaded before the draft block was checked")
+
+    monkeypatch.setattr("rdf_kg_mcp.cli.load_store", no_load)
     assert main(["serve", str(bundle_dir), "--drafts"]) == 2
     assert "no draft block" in capsys.readouterr().err
 

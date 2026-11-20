@@ -29,6 +29,17 @@ def _serve(args: argparse.Namespace) -> int:
     cache_dir = Path(args.cache_dir) if args.cache_dir else cache_root()
     started = time.monotonic()
     bundle = open_bundle(args.bundle, cache_dir)
+    block = None
+    if args.drafts:
+        # Checked before the store loads, which takes most of start-up on a large bundle.
+        block = (
+            json.loads(Path(args.draft_config).read_text("utf-8"))
+            if args.draft_config
+            else bundle.manifest.get("draft")
+        )
+        if block is None:
+            print("This bundle's manifest has no draft block; pass one with --draft-config", file=sys.stderr)
+            return 2
     store_dir = cache_dir if args.store == "disk" else None
     kg = KnowledgeGraph(bundle, load_store(bundle, store_dir))
     log.info(
@@ -40,14 +51,6 @@ def _serve(args: argparse.Namespace) -> int:
     )
     drafts = None
     if args.drafts:
-        block = (
-            json.loads(Path(args.draft_config).read_text("utf-8"))
-            if args.draft_config
-            else bundle.manifest.get("draft")
-        )
-        if block is None:
-            print("This bundle's manifest has no draft block; pass one with --draft-config", file=sys.stderr)
-            return 2
         try:
             config = DraftConfig.load(block, kg)
         except (DraftError, GraphError) as error:

@@ -161,7 +161,9 @@ Rules for query authors:
 | `sort_within` | No | Fields whose object keys are sorted at every depth on export, in UTF-16 code unit order (as JavaScript sorts strings) |
 | `sort_arrays` | No | List fields written sorted on export: the links field by relation then target, others by their JSON text |
 
-An exported line is `json.dumps` with no spaces and non-ASCII kept, so the same overlay always gives the same bytes and the same content in any key order gives the same bytes. Integers beyond 2^53 and non-finite numbers are refused, as I-JSON ([RFC 7493](https://www.rfc-editor.org/rfc/rfc7493)) requires, because readers that hold numbers as doubles would not read them back exactly. A dataset whose import parses and re-serialises each record (as Rewire's `records add` does) fixes number formatting itself; if the import kept the line's bytes, it would need its own serialiser.
+An exported line is what JavaScript's `JSON.stringify` writes for the normalised record: no spaces, non-ASCII kept, and numbers in ECMAScript form (`0.00002` and `1`, where Python writes `2e-05` and `1.0`). The same overlay always gives the same bytes, the same content in any key order gives the same bytes, and a store that reads the line and writes it back with `JSON.stringify` writes the same bytes. Integers beyond 2^53 and non-finite numbers are refused, as I-JSON ([RFC 7493](https://www.rfc-editor.org/rfc/rfc7493)) requires, because readers that hold numbers as doubles would not read them back exactly.
+
+The id field's schema in `record_schema` (`properties[id_field]`) also checks link targets and `references` entries: a value that fails it, or cannot be part of an IRI, is a problem rather than a missing record. Problems from `record_schema` are cut to 300 characters, so a large `enum` does not fill the response.
 
 ## Archives
 
