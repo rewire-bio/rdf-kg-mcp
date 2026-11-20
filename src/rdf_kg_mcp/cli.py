@@ -11,7 +11,7 @@ from pathlib import Path
 
 from . import __version__
 from .bundle import BundleError, cache_root, locate, open_bundle, pack, verify, write_manifest
-from .drafts import DraftConfig, DraftError, DraftOverlay
+from .drafts import DraftConfig, DraftError, DraftOverlay, load_records
 from .graph import GraphError, KnowledgeGraph, load_store
 from .query import QueryRunner
 
@@ -23,8 +23,12 @@ def _serve(args: argparse.Namespace) -> int:
         # A served instance stays read-only; drafts are for one local client's session.
         print("--drafts is only allowed with --transport stdio", file=sys.stderr)
         return 2
-    if (args.draft_dir or args.draft_config) and not args.drafts:
-        print("--draft-dir and --draft-config need --drafts", file=sys.stderr)
+    if (args.draft_dir or args.draft_config or args.draft_records) and not args.drafts:
+        print("--draft-dir, --draft-config and --draft-records need --drafts", file=sys.stderr)
+        return 2
+    missing = [p for p in args.draft_records or [] if not Path(p).exists()]
+    if missing:
+        print(f"--draft-records: not found: {', '.join(missing)}", file=sys.stderr)
         return 2
     cache_dir = Path(args.cache_dir) if args.cache_dir else cache_root()
     started = time.monotonic()
@@ -57,9 +61,16 @@ def _serve(args: argparse.Namespace) -> int:
             print(f"error: {error}", file=sys.stderr)
             return 2
         out_dir = Path(args.draft_dir).resolve() if args.draft_dir else None
-        drafts = DraftOverlay(kg, config, out_dir)
+        try:
+            base = load_records([Path(p) for p in args.draft_records or []], config)
+        except (DraftError, OSError) as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        drafts = DraftOverlay(kg, config, out_dir, base)
         log.info(
-            "Drafts on: %s", f"exports go to {out_dir}" if out_dir else "exports are returned inline only"
+            "Drafts on: %s; %d store records can be changed",
+            f"exports go to {out_dir}" if out_dir else "exports are returned inline only",
+            len(base),
         )
     runner = QueryRunner(bundle, store_dir, args.query_timeout) if args.query_timeout > 0 else None
     from .server import build_server  # imported late so verify/pack do not load the MCP stack
@@ -170,6 +181,13 @@ def parser() -> argparse.ArgumentParser:
     serve.add_argument("--draft-dir", help="Directory draft_export writes to (nothing is written elsewhere)")
     serve.add_argument(
         "--draft-config", help="JSON file with the draft block, used instead of the manifest's"
+    )
+    serve.add_argument(
+        "--draft-records",
+        action="append",
+        metavar="PATH",
+        help="The store's committed records (a .jsonl or .jsonl.gz file, or a directory of them; "
+        "repeatable). draft_change can change these, against the digest of their lines",
     )
     serve.set_defaults(func=_serve)
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0
+
+### Added
+
+- `draft_change` changes fields of an existing record. The server needs the store's committed lines for this, which the KG does not hold: pass them with `serve --drafts --draft-records PATH` (a `.jsonl` or `.jsonl.gz` file or a directory of them; repeatable). A change takes the record id, a list of JSON Pointer changes and the `base_sha256` of the committed line it was based on, and is refused when that digest does not match, so a stale base cannot overwrite newer data. Keys the change does not touch keep their place and their bytes: a changed value stays where it was (also when removed and set again), a new key is appended to its object in the order the changes set it, and nothing is sorted. A path with an empty key (`/props/`) and a string or key holding a lone UTF-16 surrogate are refused before anything is stored, since UTF-8 cannot hold the latter.
+- `draft_diff` fills `changed`: per record, the base and new digests and a field-level diff (`path`, `change`, `before`, `after`).
+- `draft_export` writes `changes.jsonl` beside `batch.jsonl` when there are changes: one `{id, base_sha256, sha256, record}` line per changed record, sorted by id, for the dataset's own change command. `batch.jsonl` is written as before.
+- Link targets and references found in the store records count as known, with their kind, even when the release lacks them.
+
+### Changed
+
+- `draft_upsert` refuses an id that is in the store records, as it refuses one in the release.
+
 ## 0.3.1
 
 ### Fixed

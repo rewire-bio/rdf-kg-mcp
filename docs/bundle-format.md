@@ -149,7 +149,7 @@ Rules for query authors:
 
 | Field | Required | Meaning |
 | --- | --- | --- |
-| `iri_base` | Yes | A record's IRI is `iri_base` followed by its id. A draft whose IRI is the subject of any statement in the bundle is refused: the overlay only adds records |
+| `iri_base` | Yes | A record's IRI is `iri_base` followed by its id. A new record whose IRI is the subject of any statement in the bundle is refused by `draft_upsert`; existing records change through `draft_change` and `--draft-records` |
 | `id_field`, `type_field` | Yes | The fields holding a record's id and kind |
 | `label_field` | No | The field holding its name, used to find possible duplicates |
 | `record_schema` | No | JSON Schema (2020-12) each draft must pass. The order of its top-level `properties` is the field order on export |
