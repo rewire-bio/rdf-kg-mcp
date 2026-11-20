@@ -1,8 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 ### Added
+
+- Draft tools, with `serve --drafts`: `draft_upsert`, `draft_remove`, `draft_diff` and `draft_export`. A local client adds new records, as the JSON its dataset's store uses, to a private in-memory overlay. Each draft is checked against an optional JSON Schema, the kind list, link rules and the kinds of link targets in the release, and gets a list of possible duplicates. `draft_export` writes a deterministic `batch.jsonl` and a `summary.json` to `--draft-dir`. The overlay only adds records; records already in the release are refused. Drafts are not visible to the read tools.
+- Optional manifest field `draft` describes a dataset's records for the draft tools. `--draft-config` supplies it for a bundle that lacks it. `verify` checks it.
+- `--drafts` is refused over `streamable-http`.
+- `search` also matches labels and aliases squashed (letters and digits only, case folded), so "ESM2" finds "ESM-2" and the reverse.
+- `scripts/search_recall.py` measures search recall at k against gold pairs on a real bundle, with load time, index time and peak memory.
 
 - `search` tool: ranks entities by text match over labels, `skos:altLabel` aliases and descriptions, with an optional class filter (inferred types count) and paging. The index is built at start-up. Ranking is BM25-style with light stemming and prefix matching, a class-rarity prior and at most three results per class among the leading places.
 - Optional manifest field `search.text_predicates` names extra literal predicates to index.

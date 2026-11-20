@@ -13,6 +13,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from . import __version__
+from .drafts import DraftError, DraftOverlay
 from .graph import GraphError, KnowledgeGraph
 from .query import QueryError, QueryRunner, bind_params
 from .query import run_query as execute_query
@@ -28,11 +29,21 @@ def caller_errors() -> Iterator[None]:
     """Report mistakes in the caller's input to the model; anything else stays a generic error."""
     try:
         yield
-    except (GraphError, QueryError) as error:
+    except (GraphError, QueryError, DraftError) as error:
         raise ToolError(str(error)) from error
 
 
-def instructions(kg: KnowledgeGraph) -> str:
+DRAFT_INSTRUCTIONS = """
+
+Drafts are on for this session. draft_upsert adds a new record to a private overlay, as the JSON the
+dataset's store uses (not RDF); it returns problems, warnings and possible duplicates for you to rule
+on. Records already in the release cannot be drafted. Drafts are not visible to search, find_entity,
+describe_resource or sparql_query. draft_diff lists the drafts with their checks, draft_remove drops
+one, and draft_export writes the batch and a summary. Checks here are advisory; the dataset's own
+import is the gate."""
+
+
+def instructions(kg: KnowledgeGraph, drafts: bool = False) -> str:
     bundle = kg.bundle
     descriptions = bundle.graph_descriptions
     roles = "\n".join(
@@ -46,7 +57,8 @@ def instructions(kg: KnowledgeGraph) -> str:
             f"\n\nThe dataset ships named queries ({names}). list_queries shows what each answers and its "
             "parameters; run_query runs one. Prefer them when they fit the question."
         )
-    return f"""Read-only knowledge graph: {bundle.dataset} {bundle.version or ""}.
+    access = "Knowledge graph with a draft overlay" if drafts else "Read-only knowledge graph"
+    return f"""{access}: {bundle.dataset} {bundle.version or ""}.
 {bundle.manifest.get("description") or ""}
 
 Named graphs by role:
@@ -58,12 +70,22 @@ Suggested order: describe_schema to learn the classes and properties (including 
 property chains that produce shortcuts), search to find entities by topic words, find_entity to turn a
 known name into an IRI, describe_resource to see
 everything about one IRI, then sparql_query for joins, filters and counts. Prefixes from describe_schema
-are predeclared in SPARQL. Results are capped; add LIMIT and ORDER BY for stable paging.{queries}"""
+are predeclared in SPARQL. Results are capped; add LIMIT and ORDER BY for stable paging.{queries}""" + (
+        DRAFT_INSTRUCTIONS if drafts else ""
+    )
 
 
-def build_server(kg: KnowledgeGraph, runner: QueryRunner | None, max_rows: int = 1000) -> MCPServer:
-    """Create the server. Without a runner, queries run in-process with no timeout (used in tests)."""
-    server = MCPServer(name="rdf-kg-mcp", version=__version__, instructions=instructions(kg))
+def build_server(
+    kg: KnowledgeGraph,
+    runner: QueryRunner | None,
+    max_rows: int = 1000,
+    drafts: DraftOverlay | None = None,
+) -> MCPServer:
+    """Create the server. Without a runner, queries run in-process with no timeout (used in tests).
+    With drafts, the four draft tools are added; the release graphs stay read-only either way."""
+    server = MCPServer(
+        name="rdf-kg-mcp", version=__version__, instructions=instructions(kg, drafts is not None)
+    )
     kg.search_index  # noqa: B018 - build the search index at start-up, not on the first call
     queries = {q.name: q for q in kg.bundle.queries}
 
@@ -153,6 +175,9 @@ def build_server(kg: KnowledgeGraph, runner: QueryRunner | None, max_rows: int =
             sparql = bind_params(kg, named, params)
             return {"query": name, "sparql": sparql, **await execute(sparql, rows, None)}
 
+    if drafts is not None:
+        _add_draft_tools(server, drafts)
+
     @server.resource("kg://manifest", mime_type="application/json", description="The bundle manifest.")
     def manifest() -> str:
         return json.dumps(kg.bundle.manifest, indent=2)
@@ -182,3 +207,60 @@ def build_server(kg: KnowledgeGraph, runner: QueryRunner | None, max_rows: int =
         return "\n\n".join(parts)
 
     return server
+
+
+def _add_draft_tools(server: MCPServer, drafts: DraftOverlay) -> None:
+    config = drafts.config
+    kinds = ", ".join(config.draft_kinds)
+    links = (
+        f" Links go in {config.links.field!r} as objects with {config.links.relation!r} and "
+        f"{config.links.target!r}; targets may be release records or other drafts."
+        if config.links
+        else ""
+    )
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False
+        ),
+        description=(
+            "Add a new record to this session's draft overlay, or replace a draft with the same "
+            f"{config.id_field!r}. Pass the whole record as the dataset's store writes it (JSON, not RDF); "
+            f"{config.type_field!r} must be one of: {kinds}.{links} Refused if the id is already in the "
+            "release. Returns status (added, replaced or unchanged), problems (the import will refuse "
+            "the record), warnings (it may not: a link target newer than the release, for example) and "
+            "possible_duplicates: the top search hits of the same kind on the label, plus any record "
+            "with the same name ignoring case, spaces and punctuation. Rule on each before exporting."
+        ),
+    )
+    def draft_upsert(record: dict[str, Any]) -> dict[str, Any]:
+        with caller_errors():
+            return drafts.upsert(record)
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False
+        )
+    )
+    def draft_remove(id: str) -> dict[str, Any]:
+        """Drop a draft from the overlay. Drafts that link to it then carry a warning."""
+        return drafts.remove(id)
+
+    @server.tool(annotations=READ_ONLY)
+    def draft_diff() -> dict[str, Any]:
+        """Every draft compared with the release: in this version all are additions (changed is
+        always empty). Per record: kind, label, links, problems, warnings and possible duplicates,
+        checked again across the whole overlay."""
+        return drafts.diff()
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False
+        )
+    )
+    def draft_export() -> dict[str, Any]:
+        """Export the drafts as batch.jsonl (one record per line, sorted by id, deterministic bytes)
+        and summary.json (the diff and the batch checksum). Refused while any draft has problems.
+        Files are written only to the directory the server was started with (--draft-dir), and are
+        also returned inline."""
+        return drafts.export()

@@ -1,10 +1,10 @@
 # rdf-kg-mcp
 
-Serve an RDF knowledge graph read-only over the [Model Context Protocol](https://modelcontextprotocol.io), so Claude and other MCP clients can explore and query it.
+Serve an RDF knowledge graph read-only over the [Model Context Protocol](https://modelcontextprotocol.io), so Claude and other MCP clients can explore and query it. A local client can also draft new records against it and export them for the dataset's own import (see [Drafts](#drafts)).
 
 The graph is a **bundle**: a manifest plus RDF files, with a SHA-256 checksum for each file. Inference is done once, when the bundle is built, and stored as its own named graph. The server loads the bundle into an embedded [Oxigraph](https://github.com/oxigraph/oxigraph) store, so there is no database to run or host.
 
-- Read-only: no SPARQL Update, no federated `SERVICE` calls.
+- Read-only: no SPARQL Update, no federated `SERVICE` calls. Drafts never touch the release graphs.
 - Asserted and inferred facts are kept apart, and every statement says which graph it came from.
 - Pinned versions: the server refuses a bundle whose files do not match the manifest.
 - Works with any RDF dataset. Nothing in the server is specific to one domain.
@@ -84,7 +84,42 @@ By default `sparql_query` treats the union of all graphs as the default graph, s
 - The score is multiplied by a class-rarity prior, so a handful of entities of a rare class rank above thousands of records of a common class that repeat the same word. No class takes more than three of the leading places.
 - `types` keeps only entities with one of the given classes; `limit` and `offset` page through results. Each result lists the fields that matched and its score.
 
+- Labels and aliases are also indexed squashed: case folded, with everything but letters and digits removed. The query is squashed too, whole and per word, and a squashed term matches only a whole squashed label. So `ESM2` finds "ESM-2" and `ESM-2` finds "ESM2".
+
 `find_entity` remains the tool for an exact or partial name.
+
+`scripts/search_recall.py` measures recall at k on a real bundle from gold pairs the caller supplies (a SPARQL file or JSON Lines), and reports load time, index time and peak memory on the same run.
+
+### Drafts
+
+`serve --drafts` adds four tools that let one local client build new records against the release and export them as a batch for the dataset's own import. The records are the JSON the dataset's store uses, not RDF. The bundle manifest's `draft` block (or `--draft-config`) says how records are shaped; nothing about any one dataset is in the server ([docs/bundle-format.md](docs/bundle-format.md#draft-block)).
+
+| Tool | What it does |
+| --- | --- |
+| `draft_upsert` | Adds a new record to the overlay, or replaces a draft with the same id. Refused if the id is already in the release. Returns the status (`added`, `replaced` or `unchanged`), problems, warnings and possible duplicates |
+| `draft_remove` | Drops a draft |
+| `draft_diff` | Every draft with its links, problems, warnings and possible duplicates, checked again across the whole overlay |
+| `draft_export` | Writes `batch.jsonl` (one record per line, sorted by id) and `summary.json` (the diff and the batch checksum) to `--draft-dir`, and returns both inline. Refused while any draft has problems |
+
+Checks, in order:
+
+1. The record against `record_schema` (shape, required and unknown fields, enumerations, id pattern).
+2. The kind is known and draftable.
+3. Numbers: integers beyond 2^53 and non-finite numbers are refused.
+4. Links: no duplicates, no link to itself, a known relation, and the relation allowed from this kind to the target's kind. The target's kind comes from its asserted type in the release, or from the draft.
+5. Reference fields name records of the allowed kinds.
+
+A link target found in neither the release nor the drafts is a warning, not a problem, because the store may have gained it after the release was cut. Possible duplicates are the top three `search` hits of the same kind on the record's label, plus the release records and drafts whose squashed label is the same (release matches capped at ten, same kind first, with a count of the rest). The caller rules on each one.
+
+All of this is advisory. The dataset's own import is the gate.
+
+What drafts do not do, in this version:
+
+- Change existing records. `draft_diff` always returns an empty `changed` list.
+- Appear in `search`, `find_entity`, `describe_resource` or `sparql_query`. Drafts are not projected into RDF, so they get no inferred statements either.
+- Persist. The overlay is gone when the process exits; export first.
+
+`--drafts` is refused over `streamable-http`, so a hosted server stays read-only. Files are written only under `--draft-dir`; `draft_export` takes no path.
 
 ### Named graphs
 
@@ -119,6 +154,7 @@ Values never enter the query text without validation. An optional parameter with
 ```text
 rdf-kg-mcp serve BUNDLE [--transport stdio|streamable-http] [--host H] [--port P]
                         [--store memory|disk] [--query-timeout SECONDS] [--max-rows N]
+                        [--drafts [--draft-dir DIR] [--draft-config FILE]]
 rdf-kg-mcp verify BUNDLE [--quick] [--json]
 rdf-kg-mcp manifest DIR --dataset NAME [--version V] [--graph ROLE=IRI ...] [FILES ...]
 rdf-kg-mcp pack DIR -o BUNDLE.tar.gz
@@ -131,7 +167,7 @@ rdf-kg-mcp pack DIR -o BUNDLE.tar.gz
 - `manifest` writes or refreshes `manifest.json`, filling in checksums and statement counts.
 - `pack` writes a byte-reproducible archive: the same bundle always gives the same bytes.
 
-On a graph of about 400,000 statements, loading takes under half a second and each tool call under a tenth of a second; the process uses about 350 MB, plus a second copy in the query worker.
+On a graph of about 400,000 statements, loading takes under half a second and each tool call under a tenth of a second; the process uses about 350 MB, plus a second copy in the query worker. On the Rewire bundle of 2.77 million statements (release `2026-11-20-72316db0764b`, 791 MB unpacked), loading took 3 to 6 seconds, the search index about 2 seconds, and peak memory was 2.1 to 2.6 GB before the query worker starts (an Apple laptop, in-memory store). A search takes 30 to 55 ms, and `serve --drafts` was ready in under 7 seconds.
 
 ## Making a bundle
 
@@ -162,7 +198,8 @@ Why inference happens at build time, not in the server: every consumer of the bu
 
 ## Security
 
-- The server never writes to the store, and queries cannot modify it.
+- The server never writes to the store, and queries cannot modify it. Drafts live in memory, outside the store.
+- `--drafts` works over stdio only. Exports go only to `--draft-dir`.
 - `SERVICE` is refused, so a query cannot make the server send requests elsewhere.
 - Archives with links, absolute paths or `..` entries are refused.
 - Over `streamable-http` the server has no authentication of its own. Bind it to localhost (the default) or put it behind a proxy that authenticates.
