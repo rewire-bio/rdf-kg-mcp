@@ -229,8 +229,10 @@ def _add_draft_tools(server: MCPServer, drafts: DraftOverlay) -> None:
             f"{config.type_field!r} must be one of: {kinds}.{links} Refused if the id is already in the "
             "release. Returns status (added, replaced or unchanged), problems (the import will refuse "
             "the record), warnings (it may not: a link target newer than the release, for example) and "
-            "possible_duplicates: the top search hits of the same kind on the label, plus any record "
-            "with the same name ignoring case, spaces and punctuation. Rule on each before exporting."
+            "possible_duplicates: the top search hits of the same kind whose names share at least half "
+            "their words with the label, any release record or draft with the same name ignoring case, "
+            "spaces and punctuation, and drafts with half their words in common. Rule on each before "
+            "exporting."
         ),
     )
     def draft_upsert(record: dict[str, Any]) -> dict[str, Any]:
@@ -259,8 +261,10 @@ def _add_draft_tools(server: MCPServer, drafts: DraftOverlay) -> None:
         )
     )
     def draft_export() -> dict[str, Any]:
-        """Export the drafts as batch.jsonl (one record per line, sorted by id, deterministic bytes)
-        and summary.json (the diff and the batch checksum). Refused while any draft has problems.
+        """Export the drafts as batch.jsonl (one record per line, sorted by id, deterministic bytes,
+        numbers written as JavaScript writes them) and summary.json (the diff and the batch
+        checksum). Refused while any draft has problems; a refusal also removes the files of an
+        earlier export, so the directory never holds a stale batch.
         Files are written only to the directory the server was started with (--draft-dir), and are
         also returned inline."""
         return drafts.export()

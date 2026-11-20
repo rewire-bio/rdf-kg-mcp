@@ -1,7 +1,10 @@
 """A session overlay of new records, checked against the bundle and exported as a batch.
 
 The overlay holds records as the JSON the dataset's store uses, never as RDF, so nothing is lost
-in a round trip and the export is exactly what the caller wrote, apart from key order. It only
+in a round trip. The export is the content the caller wrote with two differences: key order (see
+normalise) and number form. Numbers are written as JavaScript's JSON.stringify writes them
+(0.00002, not Python's 2e-05; 1, not 1.0), so a line is byte for byte what a JavaScript store
+writes for the same record, and a digest of the line is the digest that store computes. It only
 adds records: a record whose id is already in the release is refused. Release graphs are never
 written, drafts are not projected into RDF, and the overlay is gone when the process exits.
 
@@ -11,7 +14,8 @@ record, the kind of each class, the link field and its rules, and which fields t
 
 Every check is advisory. The dataset's own import (run on the exported batch, in review) is
 the gate. A link target that is not in the release is a warning rather than a problem, because
-the store may have gained it since the release was cut.
+the store may have gained it since the release was cut. A target that could not be any record's
+id (it fails the id field's schema, or is not usable in an IRI) is a problem.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ import os
 import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
+from decimal import Decimal
 from functools import cached_property
 from pathlib import Path
 from typing import Any
@@ -33,11 +38,17 @@ import pyoxigraph as ox
 
 from .bundle import manifest_schema
 from .graph import RDF_TYPE, GraphError, KnowledgeGraph
-from .search import squash
+from .search import squash, words
 
 # The largest integer every JSON implementation reads back exactly (RFC 7493, I-JSON).
 MAX_SAFE_INTEGER = 2**53 - 1
 DUPLICATE_SEARCH_HITS = 3
+# Search hits looked at for possible duplicates, before the word-coverage filter.
+DUPLICATE_SEARCH_POOL = 20
+# A search hit or another draft is a possible duplicate only if at least this share of the words
+# of one name appear in the other (whole, or as the start of a longer word).
+MIN_NAME_COVERAGE = 0.5
+MAX_PROBLEM_TEXT = 300
 MAX_SAME_NAME = 10
 BATCH_FILE = "batch.jsonl"
 SUMMARY_FILE = "summary.json"
@@ -141,8 +152,58 @@ def _sort_keys(value: Any) -> Any:
     return value
 
 
+def js_number(value: float) -> str:
+    """A float as ECMAScript Number::toString writes it, which is what JSON.stringify writes.
+
+    Python and JavaScript print the same shortest round-trip digits but switch to exponent form
+    at different points: JavaScript writes plain decimals from 1e-6 up to 1e21 (0.00001, where
+    Python writes 1e-05) and drops a zero fraction (1, where Python writes 1.0). Adapted from
+    rewire_evidence.canonical (rewire-bio/rewire-evidence), where it reproduces every digest in a
+    JavaScript store.
+    """
+    if not math.isfinite(value):
+        raise ValueError(f"{value!r} is not a finite number")
+    if value == 0:
+        return "0"  # JavaScript prints -0 as 0.
+    negative = value < 0
+    _, digit_tuple, exponent = Decimal(repr(abs(value))).as_tuple()
+    assert isinstance(exponent, int)
+    significant = "".join(map(str, digit_tuple)).rstrip("0") or "0"
+    count = len(significant)
+    point = exponent + len(digit_tuple)
+    if count <= point <= 21:
+        out = significant + "0" * (point - count)
+    elif 0 < point <= 21:
+        out = significant[:point] + "." + significant[point:]
+    elif -6 < point <= 0:
+        out = "0." + "0" * (-point) + significant
+    else:
+        power = point - 1
+        mantissa = significant if count == 1 else significant[0] + "." + significant[1:]
+        out = f"{mantissa}e{'+' if power >= 0 else '-'}{abs(power)}"
+    return "-" + out if negative else out
+
+
 def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    """JSON.stringify(value): keys in the order given, no spaces, JavaScript number form."""
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if value is None:
+        return "null"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return js_number(value)
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(_json(item) for item in value) + "]"
+    if isinstance(value, dict):
+        members = (f"{json.dumps(str(k), ensure_ascii=False)}:{_json(v)}" for k, v in value.items())
+        return "{" + ",".join(members) + "}"
+    raise ValueError(f"{type(value).__name__} is not a JSON value")
 
 
 def normalise(record: dict[str, Any], config: DraftConfig) -> dict[str, Any]:
@@ -189,19 +250,38 @@ class DraftOverlay:
         self._validator = (
             jsonschema.Draft202012Validator(config.record_schema) if config.record_schema else None
         )
+        id_schema = ((config.record_schema or {}).get("properties") or {}).get(config.id_field)
+        # The id field's own schema checks link targets and references: a target that could not
+        # be any record's id is a mistake, not a record the release lacks.
+        self._id_validator = (
+            self._validator.evolve(schema=id_schema)
+            if self._validator is not None and isinstance(id_schema, dict)
+            else None
+        )
 
     # Release lookups -------------------------------------------------------------------
 
     def iri(self, record_id: str) -> str:
         return self.config.iri_base + record_id
 
+    def _node(self, record_id: str) -> ox.NamedNode | None:
+        """The record's IRI as a node, or None if the id cannot be part of an IRI."""
+        try:
+            return ox.NamedNode(self.iri(record_id))
+        except ValueError:
+            return None
+
     def in_release(self, record_id: str) -> bool:
-        node = ox.NamedNode(self.iri(record_id))
+        node = self._node(record_id)
+        if node is None:
+            return False
         return next(iter(self.kg.store.quads_for_pattern(node, None, None)), None) is not None
 
     def release_kind(self, record_id: str) -> str | None:
         """The kind of a release record, from its asserted types; None if no single kind fits."""
-        node = ox.NamedNode(self.iri(record_id))
+        node = self._node(record_id)
+        if node is None:
+            return None
         quads = self.kg.store.quads_for_pattern(node, ox.NamedNode(RDF_TYPE), None, self._asserted)
         classes = {q.object.value for q in quads if isinstance(q.object, ox.NamedNode)}
         found = {self._kind_of_class[c] for c in classes if c in self._kind_of_class}
@@ -229,7 +309,7 @@ class DraftOverlay:
         if self._validator is not None:
             for error in sorted(self._validator.iter_errors(record), key=lambda e: list(e.absolute_path)):
                 where = "/".join(map(str, error.absolute_path)) or "(record)"
-                problems.append(f"{where}: {error.message}")
+                problems.append(f"{where}: {_short(error.message)}")
         kind = record.get(cfg.type_field)
         if not isinstance(kind, str) or kind not in cfg.kinds:
             problems.append(f"{cfg.type_field}: {kind!r} is not a kind of this dataset")
@@ -253,6 +333,9 @@ class DraftOverlay:
                     continue
                 if values.index(ref) != i:
                     problems.append(f"{field}[{i}]: {ref} is listed twice")
+                    continue
+                if (bad := self.id_problem(ref)) is not None:
+                    problems.append(f"{field}[{i}]: {bad}")
                     continue
                 ref_kind, where = self._target_kind(ref)
                 if where is None:
@@ -289,6 +372,9 @@ class DraftOverlay:
             if target == record.get(cfg.id_field):
                 problems.append(f"{where}: a record cannot link to itself")
                 continue
+            if (bad := self.id_problem(target)) is not None:
+                problems.append(f"{where}: {bad}")
+                continue
             rule = cfg.link_rules.get(relation) if cfg.link_rules is not None else None
             if cfg.link_rules is not None and rule is None:
                 problems.append(f"{where}: unknown relation {relation!r}")
@@ -314,6 +400,16 @@ class DraftOverlay:
                 )
         return problems, warnings
 
+    def id_problem(self, record_id: str) -> str | None:
+        """Why record_id cannot be any record's id, or None if it can."""
+        if self._node(record_id) is None:
+            return f"{record_id!r} cannot be part of an IRI"
+        if self._id_validator is not None:
+            error = next(iter(self._id_validator.iter_errors(record_id)), None)
+            if error is not None:
+                return f"{record_id!r} is not a valid {self.config.id_field}: {_short(error.message)}"
+        return None
+
     def _target_kind(self, record_id: str) -> tuple[str | None, str | None]:
         """(kind, where) for an id: where is "draft", "release" or None if found in neither."""
         draft = self.records.get(record_id)
@@ -331,9 +427,13 @@ class DraftOverlay:
         ).replace("  ", " ")
 
     def possible_duplicates(self, record: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
-        """The top search hits of the same kind on the record's label, plus the release records
-        (up to MAX_SAME_NAME, same kind first) and drafts whose squashed label equals it, and how
-        many same-name release records were left out. The caller rules on each one."""
+        """Records that may be the same as this one, for the caller to rule on:
+        - up to DUPLICATE_SEARCH_HITS search hits of the same kind on the label whose label or alias
+          shares at least MIN_NAME_COVERAGE of its words with it (match "search");
+        - release records (up to MAX_SAME_NAME, same kind first) whose squashed label equals it
+          (match "same name"), and how many more were left out;
+        - drafts with the same squashed label ("same name") or that share enough words ("near name").
+        """
         cfg = self.config
         label = record.get(cfg.label_field) if cfg.label_field else None
         if not isinstance(label, str) or not squash(label):
@@ -343,13 +443,18 @@ class DraftOverlay:
         found: dict[str, dict[str, Any]] = {}
         cls_ = cfg.kinds.get(kind) if isinstance(kind, str) else None
         try:
-            hits = self.kg.search(label, types=[cls_] if cls_ else None, limit=DUPLICATE_SEARCH_HITS + 1)
+            hits = self.kg.search(label, types=[cls_] if cls_ else None, limit=DUPLICATE_SEARCH_POOL)
         except GraphError:
             hits = {"results": []}
         rank = 0
         for hit in hits["results"]:
             record_id = self._record_id(hit["iri"])
             if record_id is None or record_id == own:
+                continue
+            names = self.kg.labels.get(hit["iri"], [])
+            if not {"label", "alias"} & set(hit["matched"]) or not any(
+                name_overlap(label, name) >= MIN_NAME_COVERAGE for name in names
+            ):
                 continue
             rank += 1
             if rank > DUPLICATE_SEARCH_HITS:
@@ -380,14 +485,21 @@ class DraftOverlay:
             entry["match"] = "same name" if entry.get("match") is None else "same name, search"
         for record_id, other in sorted(self.records.items()):
             other_label = other.get(cfg.label_field) if cfg.label_field else None
-            if record_id != own and isinstance(other_label, str) and squash(other_label) == key:
-                found[record_id] = {
-                    "id": record_id,
-                    "in": "draft",
-                    "kind": other.get(cfg.type_field),
-                    "label": other_label,
-                    "match": "same name",
-                }
+            if record_id == own or not isinstance(other_label, str):
+                continue
+            if squash(other_label) == key:
+                match = "same name"
+            elif name_overlap(label, other_label) >= MIN_NAME_COVERAGE:
+                match = "near name"
+            else:
+                continue
+            found[record_id] = {
+                "id": record_id,
+                "in": "draft",
+                "kind": other.get(cfg.type_field),
+                "label": other_label,
+                "match": match,
+            }
         return list(found.values()), max(0, len(same_name) - MAX_SAME_NAME)
 
     def _duplicates(self, record: dict[str, Any]) -> dict[str, Any]:
@@ -412,6 +524,8 @@ class DraftOverlay:
         record_id = record.get(cfg.id_field)
         if not isinstance(record_id, str) or not record_id:
             raise DraftError(f"record must have a non-empty string {cfg.id_field!r}")
+        if self._node(record_id) is None:
+            raise DraftError(f"{cfg.id_field} {record_id!r} cannot be part of an IRI, so it cannot be an id")
         if self.in_release(record_id):
             raise DraftError(
                 f"{record_id} is already in release {self.kg.bundle.version or ''}. The draft tools only "
@@ -501,10 +615,19 @@ class DraftOverlay:
         while any draft has problems. Written under --draft-dir only; returned inline too."""
         summary = self.diff()
         if summary["problems"]:
+            # A batch from an earlier export would no longer match the overlay; leave none behind.
+            removed = []
+            if self.out_dir is not None:
+                for name in (BATCH_FILE, SUMMARY_FILE):
+                    path = self.out_dir / name
+                    if path.is_file():
+                        path.unlink()
+                        removed.append(str(path))
             return {
                 "exported": False,
                 "reason": "Some drafts have problems. Fix or remove them, then export again.",
                 "problems": {e["id"]: e["problems"] for e in summary["added"] if e["problems"]},
+                "removed": removed,
             }
         batch = "".join(line(self.records[rid], self.config) + "\n" for rid in sorted(self.records))
         batch_bytes = batch.encode("utf-8")
@@ -524,6 +647,24 @@ class DraftOverlay:
             "batch": batch,
             "summary": summary,
         }
+
+
+def name_overlap(a: str, b: str) -> float:
+    """The larger share of either name's words found in the other, whole or as the start of a
+    longer word (at least four letters). 1.0 when the squashed names are equal."""
+    if squash(a) == squash(b):
+        return 1.0
+    wa, wb = set(words(a)), set(words(b))
+    if not wa or not wb:
+        return 0.0
+
+    def found(word: str, others: set[str]) -> bool:
+        return word in others or (len(word) >= 4 and any(o.startswith(word) for o in others))
+
+    return max(
+        sum(found(w, wb) for w in wa) / len(wa),
+        sum(found(w, wa) for w in wb) / len(wb),
+    )
 
 
 def _number_problems(value: Any, path: str = "") -> list[str]:
@@ -553,11 +694,27 @@ def _number_problems(value: Any, path: str = "") -> list[str]:
     return []
 
 
+def _short(message: str) -> str:
+    """A validator message cut to a readable length (an enum of hundreds of values, say)."""
+    return message if len(message) <= MAX_PROBLEM_TEXT else message[: MAX_PROBLEM_TEXT - 4] + " ..."
+
+
+def _umask() -> int:
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
+
+
+# mkstemp creates files readable by the owner only; exports get the mode a plain open() gives.
+FILE_MODE = 0o666 & ~_umask()
+
+
 def _write_atomic(path: Path, data: bytes) -> None:
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
+        os.chmod(tmp, FILE_MODE)
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)

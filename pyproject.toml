@@ -1,6 +1,6 @@
 [project]
 name = "rdf-kg-mcp"
-version = "0.3.0"
+version = "0.3.1"
 description = "Serve a versioned, pre-reasoned RDF knowledge-graph bundle read-only over the Model Context Protocol."
 readme = "README.md"
 license = "MIT"

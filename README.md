@@ -106,16 +106,18 @@ Checks, in order:
 1. The record against `record_schema` (shape, required and unknown fields, enumerations, id pattern).
 2. The kind is known and draftable.
 3. Numbers: integers beyond 2^53 and non-finite numbers are refused.
-4. Links: no duplicates, no link to itself, a known relation, and the relation allowed from this kind to the target's kind. The target's kind comes from its asserted type in the release, or from the draft.
-5. Reference fields name records of the allowed kinds.
+4. Links: no duplicates, no link to itself, a target that could be a record id (it passes the id field's schema in `record_schema` and can be part of an IRI), a known relation, and the relation allowed from this kind to the target's kind. The target's kind comes from its asserted type in the release, or from the draft.
+5. Reference fields hold possible record ids and name records of the allowed kinds.
 
-A link target found in neither the release nor the drafts is a warning, not a problem, because the store may have gained it after the release was cut. Possible duplicates are the top three `search` hits of the same kind on the record's label, plus the release records and drafts whose squashed label is the same (release matches capped at ten, same kind first; `same_name_omitted` counts the rest). The caller rules on each one.
+A link target found in neither the release nor the drafts is a warning, not a problem, because the store may have gained it after the release was cut. For the same reason a draft id the store gained after the release passes here, and the import refuses it. Possible duplicates are the top three `search` hits of the same kind on the record's label whose label shares at least half the words of one name with the other, plus the release records whose squashed label is the same (capped at ten, same kind first; `same_name_omitted` counts the rest), plus drafts with the same squashed label or half their words in common (`near name`). The caller rules on each one.
+
+An exported line is written as JavaScript's `JSON.stringify` writes the record, numbers included (`0.00002`, not `2e-05`), so for a store that hashes `JSON.stringify(record)` the digest of a line is the record's digest. If an export is refused, any `batch.jsonl` and `summary.json` left in `--draft-dir` by an earlier export are removed, so the directory never holds a batch that no longer matches the overlay.
 
 All of this is advisory. The dataset's own import is the gate.
 
 What drafts do not do, in this version:
 
-- Change existing records. `draft_diff` always returns an empty `changed` list.
+- Change existing records. `draft_diff` always returns an empty `changed` list. The bundle holds RDF, not the store's JSON, so the overlay has no exact copy of an existing record to change; a change goes through the store itself.
 - Appear in `search`, `find_entity`, `describe_resource` or `sparql_query`. Drafts are not projected into RDF, so they get no inferred statements either.
 - Persist. The overlay is gone when the process exits; export first.
 
