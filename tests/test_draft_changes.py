@@ -127,6 +127,7 @@ def test_what_cannot_be_changed(overlay: DraftOverlay, kg: KnowledgeGraph) -> No
         ("rex", [{"path": "/title"}], "needs either value or remove"),
         ("rex", [{"path": "/title", "value": 1, "extra": 1}], "must be {path, value}"),
         ("rex", [], "non-empty list"),
+        ("rex", [{"path": "/props/", "value": 1}], "has an empty key"),
         ("ghost", [{"path": "/title", "value": "x"}], "not in the store records"),
         ("finding1", [{"path": "/title", "value": "x"}], "finding records cannot be drafted"),
     ]
@@ -298,3 +299,28 @@ def test_a_key_removed_and_set_again_keeps_its_place(overlay: DraftOverlay) -> N
     record = json.loads(overlay.export()["changes"])["record"]
     assert list(record) == ["key", "species", "title", "mood", "props", "related", "seen_in"]
     assert list(record["props"]) == ["zeta", "alpha", "mid", "colour"]
+
+
+def test_a_lone_surrogate_is_refused_before_anything_is_stored(overlay: DraftOverlay) -> None:
+    # JSON.stringify would escape it, but UTF-8 cannot hold it, so the line could not be hashed.
+    for changes in (
+        [{"path": "/props/colour", "value": "\ud800"}],
+        [{"path": "/props/\udc00", "value": "x"}],
+        [{"path": "/props/colour", "value": {"nested": ["ok", "\ud800"]}}],
+    ):
+        with pytest.raises(DraftError, match="lone surrogate"):
+            overlay.change("rex", changes, sha(REX))
+        assert overlay.changes == {}
+    overlay.change("rex", [{"path": "/props/colour", "value": "black"}], sha(REX))
+    assert overlay.export()["changes"].count("\n") == 1
+    with pytest.raises(DraftError, match="lone surrogate"):
+        overlay.upsert(dog("pip", title="Pip \ud800"))
+    assert "pip" not in overlay.records
+
+
+def test_new_keys_follow_the_order_they_were_set_in(overlay: DraftOverlay) -> None:
+    overlay.change("rex", [{"path": "/props/n1", "value": 1}, {"path": "/props/n2", "value": 2}], sha(REX))
+    assert list(overlay.changes["rex"]["props"])[-2:] == ["n1", "n2"]
+    overlay.remove("rex")
+    overlay.change("rex", [{"path": "/props/n2", "value": 2}, {"path": "/props/n1", "value": 1}], sha(REX))
+    assert list(overlay.changes["rex"]["props"])[-2:] == ["n2", "n1"]

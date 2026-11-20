@@ -194,6 +194,19 @@ def js_number(value: float) -> str:
     return "-" + out if negative else out
 
 
+def _text(value: str) -> str:
+    """A JSON string. A lone UTF-16 surrogate has no UTF-8 form, so the line could not be written
+    or hashed; it is refused here, before anything is stored."""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        bad = value[error.start : error.end].encode("unicode_escape").decode("ascii")
+        raise ValueError(
+            f"the string {value[:40]!r} has a lone surrogate ({bad}), which UTF-8 cannot hold"
+        ) from None
+    return json.dumps(value, ensure_ascii=False)
+
+
 def _json(value: Any) -> str:
     """JSON.stringify(value): keys in the order given, no spaces, JavaScript number form."""
     if value is True:
@@ -203,7 +216,7 @@ def _json(value: Any) -> str:
     if value is None:
         return "null"
     if isinstance(value, str):
-        return json.dumps(value, ensure_ascii=False)
+        return _text(value)
     if isinstance(value, int):
         return str(value)
     if isinstance(value, float):
@@ -211,7 +224,7 @@ def _json(value: Any) -> str:
     if isinstance(value, (list, tuple)):
         return "[" + ",".join(_json(item) for item in value) + "]"
     if isinstance(value, dict):
-        members = (f"{json.dumps(str(k), ensure_ascii=False)}:{_json(v)}" for k, v in value.items())
+        members = (f"{_text(str(k))}:{_json(v)}" for k, v in value.items())
         return "{" + ",".join(members) + "}"
     raise ValueError(f"{type(value).__name__} is not a JSON value")
 
@@ -299,7 +312,10 @@ def _pointer(path: Any) -> list[str]:
     """A JSON Pointer (RFC 6901) as its reference tokens."""
     if not isinstance(path, str) or not path.startswith("/") or path == "/":
         raise DraftError(f"change path {path!r} must be a JSON Pointer such as /attributes/licence")
-    return [t.replace("~1", "/").replace("~0", "~") for t in path[1:].split("/")]
+    tokens = [t.replace("~1", "/").replace("~0", "~") for t in path[1:].split("/")]
+    if "" in tokens:
+        raise DraftError(f"change path {path!r} has an empty key; a record field is never named ''")
+    return tokens
 
 
 def _path_text(tokens: list[str]) -> str:
@@ -348,8 +364,9 @@ def apply_changes(record: dict[str, Any], changes: Any, protected: tuple[str, ..
 
 def keep_order(base: Any, changed: Any) -> Any:
     """`changed` with the keys of every object that `base` also has in `base`'s order, and keys
-    `base` lacks after them in their own order. A key removed and set again therefore goes back to
-    its place, so only content moves a key, never the order the changes were given in."""
+    `base` lacks after them in the order they were first set. A key removed and set again therefore
+    goes back to its place: the order of the changes never moves a key the base has, but it does
+    order the keys the change adds (/a/n1 then /a/n2 differs from /a/n2 then /a/n1)."""
     if not (isinstance(base, dict) and isinstance(changed, dict)):
         return changed
     order = [k for k in base if k in changed] + [k for k in changed if k not in base]
@@ -751,7 +768,11 @@ class DraftOverlay:
                 "redo the change against the current line."
             )
         parsed = json.loads(base.line)
-        if _json(parsed) != base.line:
+        try:
+            written = _json(parsed)
+        except ValueError as error:
+            raise DraftError(f"The committed line of {record_id} cannot be written again: {error}") from error
+        if written != base.line:
             raise DraftError(
                 f"The committed line of {record_id} is not in the form this server writes (JSON.stringify "
                 "of the parsed record), so a change would also rewrite fields it does not touch."
