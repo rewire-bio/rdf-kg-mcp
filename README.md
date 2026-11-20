@@ -109,7 +109,7 @@ Checks, in order:
 4. Links: no duplicates, no link to itself, a known relation, and the relation allowed from this kind to the target's kind. The target's kind comes from its asserted type in the release, or from the draft.
 5. Reference fields name records of the allowed kinds.
 
-A link target found in neither the release nor the drafts is a warning, not a problem, because the store may have gained it after the release was cut. Possible duplicates are the top three `search` hits of the same kind on the record's label, plus the release records and drafts whose squashed label is the same (release matches capped at ten, same kind first, with a count of the rest). The caller rules on each one.
+A link target found in neither the release nor the drafts is a warning, not a problem, because the store may have gained it after the release was cut. Possible duplicates are the top three `search` hits of the same kind on the record's label, plus the release records and drafts whose squashed label is the same (release matches capped at ten, same kind first; `same_name_omitted` counts the rest). The caller rules on each one.
 
 All of this is advisory. The dataset's own import is the gate.
 

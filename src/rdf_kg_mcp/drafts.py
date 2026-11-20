@@ -9,7 +9,7 @@ Everything that depends on one dataset's record shape comes from the manifest's 
 file given with --draft-config): the IRI base, the id, kind and label fields, a JSON Schema for a
 record, the kind of each class, the link field and its rules, and which fields to sort on export.
 
-Every check is advisory. The dataset's own import (for Rewire, records add in a pull request) is
+Every check is advisory. The dataset's own import (run on the exported batch, in review) is
 the gate. A link target that is not in the release is a warning rather than a problem, because
 the store may have gained it since the release was cut.
 """
@@ -330,13 +330,14 @@ class DraftOverlay:
             "This is fine only if the store gained it after this release."
         ).replace("  ", " ")
 
-    def possible_duplicates(self, record: dict[str, Any]) -> list[dict[str, Any]]:
-        """The top search hits of the same kind on the record's label, plus every release record
-        and draft whose squashed label equals it. The caller rules on each one."""
+    def possible_duplicates(self, record: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
+        """The top search hits of the same kind on the record's label, plus the release records
+        (up to MAX_SAME_NAME, same kind first) and drafts whose squashed label equals it, and how
+        many same-name release records were left out. The caller rules on each one."""
         cfg = self.config
         label = record.get(cfg.label_field) if cfg.label_field else None
         if not isinstance(label, str) or not squash(label):
-            return []
+            return [], 0
         own = record.get(cfg.id_field)
         kind = record.get(cfg.type_field)
         found: dict[str, dict[str, Any]] = {}
@@ -377,12 +378,6 @@ class DraftOverlay:
                 },
             )
             entry["match"] = "same name" if entry.get("match") is None else "same name, search"
-        if len(same_name) > MAX_SAME_NAME:
-            found["..."] = {
-                "omitted": len(same_name) - MAX_SAME_NAME,
-                "match": "same name",
-                "note": "More release records share this name; search for them to see all.",
-            }
         for record_id, other in sorted(self.records.items()):
             other_label = other.get(cfg.label_field) if cfg.label_field else None
             if record_id != own and isinstance(other_label, str) and squash(other_label) == key:
@@ -393,7 +388,14 @@ class DraftOverlay:
                     "label": other_label,
                     "match": "same name",
                 }
-        return list(found.values())
+        return list(found.values()), max(0, len(same_name) - MAX_SAME_NAME)
+
+    def _duplicates(self, record: dict[str, Any]) -> dict[str, Any]:
+        found, omitted = self.possible_duplicates(record)
+        out: dict[str, Any] = {"possible_duplicates": found}
+        if omitted:
+            out["same_name_omitted"] = omitted
+        return out
 
     def _record_id(self, iri: str) -> str | None:
         base = self.config.iri_base
@@ -434,7 +436,7 @@ class DraftOverlay:
             "status": status,
             "problems": problems,
             "warnings": warnings,
-            "possible_duplicates": self.possible_duplicates(record),
+            **self._duplicates(record),
             "drafts": len(self.records),
         }
 
@@ -482,7 +484,7 @@ class DraftOverlay:
                     entry[field] = record[field]
             entry["problems"] = problems
             entry["warnings"] = warnings
-            entry["possible_duplicates"] = self.possible_duplicates(record)
+            entry.update(self._duplicates(record))
             added.append(entry)
         return {
             "dataset": self.kg.bundle.dataset,

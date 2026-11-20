@@ -372,3 +372,15 @@ def test_many_records_with_the_same_name_are_capped(overlay: DraftOverlay) -> No
     dups = overlay.upsert(dog("rexy", title="Rex"))["possible_duplicates"]
     assert sum(d.get("in") == "draft" for d in dups) == 12
     assert next(d for d in dups if d["id"] == "rex")["label"] == "Rex"
+
+
+def test_same_name_release_matches_beyond_the_cap_are_counted(
+    overlay: DraftOverlay, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("rdf_kg_mcp.drafts.MAX_SAME_NAME", 0)
+    result = overlay.upsert(dog("rexy", title="Rex"))
+    assert result["same_name_omitted"] == 1
+    assert all("id" in d for d in result["possible_duplicates"])
+    assert overlay.diff()["added"][0]["same_name_omitted"] == 1
+    monkeypatch.setattr("rdf_kg_mcp.drafts.MAX_SAME_NAME", 10)
+    assert "same_name_omitted" not in overlay.upsert(dog("rexy", title="Rex"))
