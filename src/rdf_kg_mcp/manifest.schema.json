@@ -113,6 +113,160 @@
       },
       "additionalProperties": false
     },
+    "draft": {
+      "type": "object",
+      "description": "How records of this dataset are written, for the draft tools (serve --drafts). The server reads only this block, so nothing about one dataset's record shape is in its code. Records are JSON objects; the bundle's RDF is never written.",
+      "required": [
+        "iri_base",
+        "id_field",
+        "type_field",
+        "kinds",
+        "draft_kinds"
+      ],
+      "properties": {
+        "iri_base": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9+.-]*:",
+          "description": "A record's IRI is iri_base followed by its id."
+        },
+        "id_field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type_field": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The field naming the record's kind."
+        },
+        "label_field": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The field holding the record's name, used for the duplicate check."
+        },
+        "record_schema": {
+          "type": "object",
+          "description": "JSON Schema (2020-12) every draft record must pass. The order of its top-level properties is the field order of exported records."
+        },
+        "kinds": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "Kind to the one class IRI (or prefixed name) that marks a record of that kind in the asserted graph. Used to find the kind of a release record. Each class must belong to one kind only.",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "draft_kinds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "description": "Kinds the draft tools accept. Every one must be a key of kinds."
+        },
+        "links": {
+          "type": "object",
+          "required": [
+            "field",
+            "relation",
+            "target"
+          ],
+          "additionalProperties": false,
+          "description": "The field holding a record's links: a list of objects naming a relation and a target record id.",
+          "properties": {
+            "field": {
+              "type": "string",
+              "minLength": 1
+            },
+            "relation": {
+              "type": "string",
+              "minLength": 1
+            },
+            "target": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "link_rules": {
+          "type": "object",
+          "description": "Relation to the kinds it may link from and to. A relation not listed is refused.",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "from",
+              "to"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "from": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "uniqueItems": true
+              },
+              "to": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "uniqueItems": true
+              },
+              "description": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "references": {
+          "type": "array",
+          "description": "Fields holding a list of record ids that must name records of the given kinds, such as a list of sources.",
+          "items": {
+            "type": "object",
+            "required": [
+              "field",
+              "kinds"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "field": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kinds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "uniqueItems": true
+              }
+            }
+          }
+        },
+        "sort_within": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Top-level fields whose object keys are sorted at every depth on export (UTF-16 code unit order, as JavaScript sorts strings)."
+        },
+        "sort_arrays": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Top-level list fields written sorted on export. The links field is sorted by relation, then target; other lists by their JSON text."
+        }
+      },
+      "additionalProperties": false
+    },
     "example_queries": {
       "type": "array",
       "items": {

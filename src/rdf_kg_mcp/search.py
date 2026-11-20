@@ -8,6 +8,11 @@ a class-rarity prior: entities of rare classes (a handful of use cases, models o
 above the many records of common classes (results, evaluations) that repeat the same word.
 Results are then diversified so that one class fills at most a few of the leading places.
 
+Labels and aliases are also indexed squashed: case folded with everything but letters and digits
+removed, as one term. The query is squashed the same way, whole and per whitespace-separated
+chunk, and a squashed term matches only a whole squashed label, so "ESM2" finds "ESM-2" and
+"ESM-2" finds "ESM2", which word matching cannot do.
+
 Nothing here is specific to one dataset. Only statements outside the ontology graph are indexed.
 """
 
@@ -25,6 +30,11 @@ import pyoxigraph as ox
 
 ALT_LABEL = "http://www.w3.org/2004/02/skos/core#altLabel"
 FIELD_WEIGHTS = {"label": 3.0, "alias": 2.0, "description": 1.0, "text": 1.0}
+# Fields whose values are also indexed squashed, and the field name the squashed copy goes in.
+SQUASHED_FIELDS = {"label": "label_squashed", "alias": "alias_squashed"}
+SQUASHED_NAMES = {squashed: name for name, squashed in SQUASHED_FIELDS.items()}
+# Squashed terms live in the same postings as word stems, behind a prefix no word can start with.
+SQUASH_MARK = "\x00"
 PREFIX_WEIGHT = 0.6
 MIN_PREFIX = 4
 RARITY_EXPONENT = 2.0
@@ -46,6 +56,17 @@ def stem(word: str) -> str:
 
 def words(text: str) -> list[str]:
     return [stem(w) for w in _WORD.findall(text.casefold())]
+
+
+def squash(text: str) -> str:
+    """Case-folded letters and digits only: "ESM-2" and "esm 2" both give "esm2"."""
+    return "".join(_WORD.findall(text.casefold()))
+
+
+def squashed_terms(text: str) -> list[str]:
+    """The whole query squashed, then each whitespace-separated chunk, without repeats."""
+    chunks = [text, *text.split()]
+    return [SQUASH_MARK + term for term in dict.fromkeys(squash(c) for c in chunks) if term]
 
 
 @dataclass
@@ -86,12 +107,17 @@ class SearchIndex:
                 if not tokens:
                     continue
                 doc = index.docs.setdefault(iri, _Doc())
-                doc.lengths[name] = doc.lengths.get(name, 0) + len(tokens)
-                for token in tokens:
-                    counts = index.postings[token].setdefault(iri, {})
-                    counts[name] = counts.get(name, 0) + 1
+                index._add(iri, doc, name, tokens)
+                if name in SQUASHED_FIELDS:
+                    index._add(iri, doc, SQUASHED_FIELDS[name], [SQUASH_MARK + squash(obj.value)])
         index._finish(types)
         return index
+
+    def _add(self, iri: str, doc: _Doc, name: str, tokens: list[str]) -> None:
+        doc.lengths[name] = doc.lengths.get(name, 0) + len(tokens)
+        for token in tokens:
+            counts = self.postings[token].setdefault(iri, {})
+            counts[name] = counts.get(name, 0) + 1
 
     def _finish(self, types: dict[str, set[str]]) -> None:
         totals: Counter[str] = Counter()
@@ -118,7 +144,8 @@ class SearchIndex:
 
     def _expand(self, stem_: str) -> list[tuple[str, float]]:
         matches = [(stem_, 1.0)] if stem_ in self.postings else []
-        if len(stem_) < MIN_PREFIX:
+        # Squashed terms match whole only; a prefix of a squashed label is not a word boundary.
+        if len(stem_) < MIN_PREFIX or stem_.startswith(SQUASH_MARK):
             return matches
         i = bisect.bisect_right(self._terms, stem_)
         while i < len(self._terms) and self._terms[i].startswith(stem_):
@@ -131,8 +158,8 @@ class SearchIndex:
         scores: dict[str, float] = defaultdict(float)
         matched: dict[str, set[str]] = defaultdict(set)
         n = max(1, len(self.docs))
-        for query_stem in dict.fromkeys(words(text)):
-            for term, weight in self._expand(query_stem):
+        for query_term in dict.fromkeys([*words(text), *squashed_terms(text)]):
+            for term, weight in self._expand(query_term):
                 posting = self.postings[term]
                 idf = math.log(1 + (n - len(posting) + 0.5) / (len(posting) + 0.5))
                 for iri, fields in posting.items():
@@ -140,8 +167,9 @@ class SearchIndex:
                     total = 0.0
                     for name, tf in fields.items():
                         norm = 1 - B + B * doc.lengths[name] / self.average[name]
-                        total += FIELD_WEIGHTS.get(name, 1.0) * tf * (K1 + 1) / (tf + K1 * norm)
-                        matched[iri].add(name)
+                        original = SQUASHED_NAMES.get(name, name)
+                        total += FIELD_WEIGHTS.get(original, 1.0) * tf * (K1 + 1) / (tf + K1 * norm)
+                        matched[iri].add(original)
                     scores[iri] += weight * idf * total
         for iri in scores:
             scores[iri] *= self.docs[iri].rarity ** RARITY_EXPONENT

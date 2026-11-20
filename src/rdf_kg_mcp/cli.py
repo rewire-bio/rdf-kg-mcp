@@ -11,13 +11,21 @@ from pathlib import Path
 
 from . import __version__
 from .bundle import BundleError, cache_root, locate, open_bundle, pack, verify, write_manifest
-from .graph import KnowledgeGraph, load_store
+from .drafts import DraftConfig, DraftError, DraftOverlay
+from .graph import GraphError, KnowledgeGraph, load_store
 from .query import QueryRunner
 
 log = logging.getLogger("rdf_kg_mcp")
 
 
 def _serve(args: argparse.Namespace) -> int:
+    if args.drafts and args.transport != "stdio":
+        # A served instance stays read-only; drafts are for one local client's session.
+        print("--drafts is only allowed with --transport stdio", file=sys.stderr)
+        return 2
+    if (args.draft_dir or args.draft_config) and not args.drafts:
+        print("--draft-dir and --draft-config need --drafts", file=sys.stderr)
+        return 2
     cache_dir = Path(args.cache_dir) if args.cache_dir else cache_root()
     started = time.monotonic()
     bundle = open_bundle(args.bundle, cache_dir)
@@ -30,10 +38,30 @@ def _serve(args: argparse.Namespace) -> int:
         len(kg.store),
         time.monotonic() - started,
     )
+    drafts = None
+    if args.drafts:
+        block = (
+            json.loads(Path(args.draft_config).read_text("utf-8"))
+            if args.draft_config
+            else bundle.manifest.get("draft")
+        )
+        if block is None:
+            print("This bundle's manifest has no draft block; pass one with --draft-config", file=sys.stderr)
+            return 2
+        try:
+            config = DraftConfig.load(block, kg)
+        except (DraftError, GraphError) as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        out_dir = Path(args.draft_dir).resolve() if args.draft_dir else None
+        drafts = DraftOverlay(kg, config, out_dir)
+        log.info(
+            "Drafts on: %s", f"exports go to {out_dir}" if out_dir else "exports are returned inline only"
+        )
     runner = QueryRunner(bundle, store_dir, args.query_timeout) if args.query_timeout > 0 else None
     from .server import build_server  # imported late so verify/pack do not load the MCP stack
 
-    server = build_server(kg, runner, max_rows=args.max_rows)
+    server = build_server(kg, runner, max_rows=args.max_rows, drafts=drafts)
     try:
         if args.transport == "stdio":
             server.run("stdio")
@@ -131,6 +159,15 @@ def parser() -> argparse.ArgumentParser:
         help="Seconds before a SPARQL query is stopped; 0 runs queries in-process with no timeout",
     )
     serve.add_argument("--max-rows", type=int, default=1000, help="Default row cap for sparql_query")
+    serve.add_argument(
+        "--drafts",
+        action="store_true",
+        help="Add the draft tools: a private overlay of new records for this session (stdio only)",
+    )
+    serve.add_argument("--draft-dir", help="Directory draft_export writes to (nothing is written elsewhere)")
+    serve.add_argument(
+        "--draft-config", help="JSON file with the draft block, used instead of the manifest's"
+    )
     serve.set_defaults(func=_serve)
 
     check = sub.add_parser("verify", help="Check a bundle's manifest, checksums and statement counts")

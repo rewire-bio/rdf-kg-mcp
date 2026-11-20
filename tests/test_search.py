@@ -151,3 +151,37 @@ def test_declared_text_predicates_are_indexed(tmp_path: Path) -> None:
     declared = graph(make_search_bundle(tmp_path / "declared", {"search": {"text_predicates": ["ex:topic"]}}))
     found = declared.search("wombat")["results"]
     assert [r["id"] for r in found] == ["id:note"] and found[0]["matched"] == ["text"]
+
+
+def test_squashed_labels_match_spelling_variants(tmp_path: Path) -> None:
+    root = tmp_path / "spell"
+    lines = [
+        _t("esm-2", "Model"),
+        _q("esm-2", LABEL, "ESM-2"),
+        _t("esm1b", "Model"),
+        _q("esm1b", LABEL, "ESM1b"),
+        _t("nt", "Model"),
+        _q("nt", LABEL, "Nucleotide Transformer"),
+        _q("nt", ALT, "NT-v2"),
+    ]
+    (root / "ontology").mkdir(parents=True)
+    (root / "asserted.nq").write_text("\n".join(sorted(lines)) + "\n")
+    (root / "ontology" / "o.ttl").write_text(ONTOLOGY_TTL)
+    write_manifest(
+        root,
+        {
+            "dataset": "spell",
+            "graphs": {"asserted": ASSERTED, "ontology": ONTOLOGY},
+            "prefixes": {"ex": EX, "id": ID},
+            "files": {"ontology/o.ttl": {"graph": ONTOLOGY}},
+        },
+    )
+    spelled = graph(root)
+    assert ids(spelled.search("ESM2"))[:1] == ["id:esm-2"]
+    assert ids(spelled.search("esm 2"))[:1] == ["id:esm-2"]
+    assert ids(spelled.search("ESM-1b"))[:1] == ["id:esm1b"]
+    assert ids(spelled.search("ESM-1b 650M"))[:1] == ["id:esm1b"]
+    found = spelled.search("ntv2")["results"]
+    assert [r["id"] for r in found] == ["id:nt"] and found[0]["matched"] == ["alias"]
+    # A squashed term is matched whole, never as a prefix: "esm" finds the word in "ESM-2" only.
+    assert ids(spelled.search("esm")) == ["id:esm-2"]

@@ -1,6 +1,6 @@
 [project]
 name = "rdf-kg-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "Serve a versioned, pre-reasoned RDF knowledge-graph bundle read-only over the Model Context Protocol."
 readme = "README.md"
 license = "MIT"
@@ -42,7 +42,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "tests", "docs", "README.md", "LICENSE"]
+include = ["src", "tests", "scripts", "docs", "README.md", "LICENSE"]
 
 [tool.ruff]
 line-length = 110

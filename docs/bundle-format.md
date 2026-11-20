@@ -65,6 +65,7 @@ A bundle is a directory, or a `.tar.gz` of one, containing `manifest.json` and t
 | `prefixes` | No | Prefix to namespace; used to shorten IRIs in results and predeclared in SPARQL |
 | `label_predicates` | No | Predicates searched by `find_entity` (IRIs or prefixed names). Default: `rdfs:label`, `skos:prefLabel`, `skos:altLabel`, `schema:name`, `dcterms:title` |
 | `search` | No | `{"text_predicates": [...]}`: extra literal predicates indexed by `search`, beyond labels, `skos:altLabel` and descriptions |
+| `draft` | No | How the dataset's records are written, for `serve --drafts`; see [Draft block](#draft-block) |
 | `example_queries` | No | `{title, query, description}` items offered as a prompt |
 | `queries` | No | Named, parameterised queries served by `list_queries` and `run_query`; see [Named queries](#named-queries) |
 | `inferred`, `shacl` | No | Free-form records of how inferences and validation were produced, shown by `dataset_info` |
@@ -124,6 +125,43 @@ Rules for query authors:
 - An `integer` parameter can be used in `LIMIT` and `OFFSET`.
 
 `verify` reports a duplicate query or parameter name, a declared parameter that the query does not use as `$name`, a default of the wrong type, and a query that is not read-only.
+
+## Draft block
+
+`serve --drafts` lets a local client add new records to a private overlay and export them as a batch for the dataset's own import. The server knows nothing about any dataset's records except what this block says. A client can also pass the block in a file with `--draft-config`, for a bundle built before it had one.
+
+```json
+"draft": {
+  "iri_base": "https://example.org/id/",
+  "id_field": "id",
+  "type_field": "kind",
+  "label_field": "name",
+  "record_schema": { "type": "object", "required": ["id", "kind", "name"], "properties": { "...": {} } },
+  "kinds": { "dog": "ex:Dog", "person": "ex:Person" },
+  "draft_kinds": ["dog"],
+  "links": { "field": "links", "relation": "relation", "target": "target_id" },
+  "link_rules": { "owned_by": { "from": ["dog"], "to": ["person"] } },
+  "references": [{ "field": "source_ids", "kinds": ["source"] }],
+  "sort_within": ["attributes"],
+  "sort_arrays": ["links"]
+}
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `iri_base` | Yes | A record's IRI is `iri_base` followed by its id. A draft whose IRI is the subject of any statement in the bundle is refused: the overlay only adds records |
+| `id_field`, `type_field` | Yes | The fields holding a record's id and kind |
+| `label_field` | No | The field holding its name, used to find possible duplicates |
+| `record_schema` | No | JSON Schema (2020-12) each draft must pass. The order of its top-level `properties` is the field order on export |
+| `kinds` | Yes | Kind to the one class that marks records of that kind in the asserted graph. A class may belong to one kind only. Used to find the kind of a link target |
+| `draft_kinds` | Yes | The kinds that may be drafted |
+| `links` | No | The list field holding links, and the keys of a link's relation and target id |
+| `link_rules` | No | Relation to the kinds it may link from and to. When present, any other relation is refused |
+| `references` | No | List fields of record ids that must name records of the given kinds |
+| `sort_within` | No | Fields whose object keys are sorted at every depth on export, in UTF-16 code unit order (as JavaScript sorts strings) |
+| `sort_arrays` | No | List fields written sorted on export: the links field by relation then target, others by their JSON text |
+
+An exported line is `json.dumps` with no spaces and non-ASCII kept, so the same overlay always gives the same bytes and the same content in any key order gives the same bytes. Integers beyond 2^53 and non-finite numbers are refused, as I-JSON ([RFC 7493](https://www.rfc-editor.org/rfc/rfc7493)) requires, because readers that hold numbers as doubles would not read them back exactly. A dataset whose import parses and re-serialises each record (as Rewire's `records add` does) fixes number formatting itself; if the import kept the line's bytes, it would need its own serialiser.
 
 ## Archives
 
