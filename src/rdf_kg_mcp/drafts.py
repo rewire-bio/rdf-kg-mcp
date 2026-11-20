@@ -16,11 +16,20 @@ Every check is advisory. The dataset's own import (run on the exported batch, in
 the gate. A link target that is not in the release is a warning rather than a problem, because
 the store may have gained it since the release was cut. A target that could not be any record's
 id (it fails the id field's schema, or is not usable in an IRI) is a problem.
+
+Changes to existing records (draft_change) need the store's committed lines, which the KG does not
+hold: the caller passes them with --draft-records. A change names the record, the base_sha256 of
+the line it was based on, and field changes as JSON Pointer paths. It is applied to that line as
+parsed, so every key it does not touch keeps its place: a changed value stays where it was, a new
+key goes at the end of its object, and nothing is sorted. The exported changes file carries the
+whole changed record with the base and new digests, for the store's own change command, which
+checks the base digest again before it writes.
 """
 
 from __future__ import annotations
 
 import copy
+import gzip
 import hashlib
 import json
 import math
@@ -51,6 +60,7 @@ MIN_NAME_COVERAGE = 0.5
 MAX_PROBLEM_TEXT = 300
 MAX_SAME_NAME = 10
 BATCH_FILE = "batch.jsonl"
+CHANGES_FILE = "changes.jsonl"
 SUMMARY_FILE = "summary.json"
 
 
@@ -235,15 +245,143 @@ def line(record: dict[str, Any], config: DraftConfig) -> str:
     return _json(normalise(record, config))
 
 
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class BaseRecord:
+    """A committed store line, kept as bytes: a change is applied to it and diffed against it."""
+
+    line: str
+    kind: str | None
+    source: str
+
+    @cached_property
+    def sha256(self) -> str:
+        return sha256_text(self.line)
+
+
+def load_records(paths: list[Path], config: DraftConfig) -> dict[str, BaseRecord]:
+    """The committed lines of the store's records, by id, from JSON Lines files (.jsonl or
+    .jsonl.gz) or directories of them (not recursive). An id found twice is an error."""
+    files: list[Path] = []
+    for path in paths:
+        if path.is_dir():
+            files += sorted(p for p in path.iterdir() if p.name.endswith((".jsonl", ".jsonl.gz")))
+        elif path.is_file():
+            files.append(path)
+        else:
+            raise DraftError(f"--draft-records: {path} does not exist")
+    out: dict[str, BaseRecord] = {}
+    for file in files:
+        opener = gzip.open if file.name.endswith(".gz") else open
+        with opener(file, "rt", encoding="utf-8", newline="") as handle:
+            for number, raw in enumerate(handle, 1):
+                text = raw.rstrip("\n")
+                if not text.strip():
+                    continue
+                try:
+                    value = json.loads(text)
+                except json.JSONDecodeError as error:
+                    raise DraftError(f"--draft-records: {file}:{number} is not JSON: {error}") from error
+                record_id = value.get(config.id_field) if isinstance(value, dict) else None
+                if not isinstance(record_id, str) or not record_id:
+                    raise DraftError(f"--draft-records: {file}:{number} has no string {config.id_field!r}")
+                if record_id in out:
+                    raise DraftError(f"--draft-records: {record_id} is in {out[record_id].source} and {file}")
+                kind = value.get(config.type_field)
+                out[record_id] = BaseRecord(text, kind if isinstance(kind, str) else None, str(file))
+    return out
+
+
+def _pointer(path: Any) -> list[str]:
+    """A JSON Pointer (RFC 6901) as its reference tokens."""
+    if not isinstance(path, str) or not path.startswith("/") or path == "/":
+        raise DraftError(f"change path {path!r} must be a JSON Pointer such as /attributes/licence")
+    return [t.replace("~1", "/").replace("~0", "~") for t in path[1:].split("/")]
+
+
+def _path_text(tokens: list[str]) -> str:
+    return "/" + "/".join(t.replace("~", "~0").replace("/", "~1") for t in tokens)
+
+
+def apply_changes(record: dict[str, Any], changes: Any, protected: tuple[str, ...]) -> dict[str, Any]:
+    """The record with the changes applied, in order. Each change is {"path", "value"} (set) or
+    {"path", "remove": true}. Setting an existing key replaces its value where it stands; a new
+    key is appended to its object, and missing parent objects are created the same way. Paths go
+    through objects only: a list is replaced whole. Keys in `protected` cannot be changed."""
+    if not isinstance(changes, list) or not changes:
+        raise DraftError("changes must be a non-empty list of {path, value} or {path, remove: true}")
+    out = copy.deepcopy(record)
+    for i, change in enumerate(changes):
+        if not isinstance(change, dict) or set(change) - {"path", "value", "remove"}:
+            raise DraftError(f"changes[{i}] must be {{path, value}} or {{path, remove: true}}")
+        tokens = _pointer(change.get("path"))
+        remove = change.get("remove") is True
+        if remove == ("value" in change):
+            raise DraftError(f"changes[{i}] ({change.get('path')}) needs either value or remove: true")
+        if tokens[0] in protected:
+            raise DraftError(f"changes[{i}]: {tokens[0]!r} cannot be changed; it names the record")
+        parent: Any = out
+        for depth, token in enumerate(tokens[:-1]):
+            if not isinstance(parent, dict):
+                raise DraftError(
+                    f"changes[{i}]: {_path_text(tokens[:depth])} is not an object; replace it whole"
+                )
+            if token not in parent:
+                if remove:
+                    raise DraftError(f"changes[{i}]: {_path_text(tokens[: depth + 1])} does not exist")
+                parent[token] = {}
+            parent = parent[token]
+        if not isinstance(parent, dict):
+            raise DraftError(f"changes[{i}]: {_path_text(tokens[:-1])} is not an object; replace it whole")
+        if remove:
+            if tokens[-1] not in parent:
+                raise DraftError(f"changes[{i}]: {change['path']} does not exist")
+            del parent[tokens[-1]]
+        else:
+            parent[tokens[-1]] = copy.deepcopy(change["value"])
+    return out
+
+
+def field_diff(before: Any, after: Any, path: list[str] | None = None) -> list[dict[str, Any]]:
+    """Leaf-level differences as {path, change, before, after}: objects are compared key by key,
+    anything else (lists included) as a whole, by its exported bytes. Key order alone is no change."""
+    path = path or []
+    if isinstance(before, dict) and isinstance(after, dict):
+        out: list[dict[str, Any]] = []
+        for key in [*before, *(k for k in after if k not in before)]:
+            if key not in after:
+                out.append({"path": _path_text([*path, key]), "change": "removed", "before": before[key]})
+            elif key not in before:
+                out.append({"path": _path_text([*path, key]), "change": "added", "after": after[key]})
+            else:
+                out += field_diff(before[key], after[key], [*path, key])
+        return out
+    if _json(before) == _json(after):
+        return []
+    return [{"path": _path_text(path) or "/", "change": "changed", "before": before, "after": after}]
+
+
 # Overlay ---------------------------------------------------------------------------------
 
 
 class DraftOverlay:
-    def __init__(self, kg: KnowledgeGraph, config: DraftConfig, out_dir: Path | None = None):
+    def __init__(
+        self,
+        kg: KnowledgeGraph,
+        config: DraftConfig,
+        out_dir: Path | None = None,
+        base: dict[str, BaseRecord] | None = None,
+    ):
         self.kg = kg
         self.config = config
         self.out_dir = out_dir
         self.records: dict[str, dict[str, Any]] = {}
+        # Committed store lines (--draft-records), and changes to them by id.
+        self.base: dict[str, BaseRecord] = base or {}
+        self.changes: dict[str, dict[str, Any]] = {}
         self._kind_of_class = {c: k for k, c in config.kinds.items()}
         asserted = kg.bundle.graphs.get("asserted")
         self._asserted = ox.NamedNode(asserted) if asserted else None
@@ -411,11 +549,14 @@ class DraftOverlay:
         return None
 
     def _target_kind(self, record_id: str) -> tuple[str | None, str | None]:
-        """(kind, where) for an id: where is "draft", "release" or None if found in neither."""
+        """(kind, where) for an id: where is "draft", "store" (the --draft-records lines),
+        "release" or None if found in none."""
         draft = self.records.get(record_id)
         if draft is not None:
             kind = draft.get(self.config.type_field)
             return (kind if isinstance(kind, str) else None), "draft"
+        if record_id in self.base:
+            return self.base[record_id].kind, "store"
         if self.in_release(record_id):
             return self.release_kind(record_id), "release"
         return None, None
@@ -526,10 +667,16 @@ class DraftOverlay:
             raise DraftError(f"record must have a non-empty string {cfg.id_field!r}")
         if self._node(record_id) is None:
             raise DraftError(f"{cfg.id_field} {record_id!r} cannot be part of an IRI, so it cannot be an id")
+        if record_id in self.base:
+            raise DraftError(
+                f"{record_id} is already in the store records. Change it with draft_change, which "
+                "takes the base_sha256 of its line and the fields to change."
+            )
         if self.in_release(record_id):
             raise DraftError(
-                f"{record_id} is already in release {self.kg.bundle.version or ''}. The draft tools only "
-                "add new records; change an existing record through the store itself."
+                f"{record_id} is already in release {self.kg.bundle.version or ''}. draft_upsert only "
+                "adds new records; change an existing one with draft_change"
+                + ("." if self.base else ", which needs the store's lines (serve --draft-records).")
             )
         try:
             new_line = line(record, cfg)
@@ -551,14 +698,115 @@ class DraftOverlay:
             "problems": problems,
             "warnings": warnings,
             **self._duplicates(record),
-            "drafts": len(self.records),
+            "drafts": self.count,
+        }
+
+    @property
+    def count(self) -> int:
+        return len(self.records) + len(self.changes)
+
+    def _base_of(self, record_id: str) -> BaseRecord:
+        cfg = self.config
+        if not self.base:
+            raise DraftError(
+                "No store records were given, so existing records cannot be changed. Start the server "
+                "with --draft-records naming the store's record files."
+            )
+        base = self.base.get(record_id)
+        if base is None:
+            raise DraftError(
+                f"{record_id} is not in the store records given with --draft-records; "
+                "draft_upsert adds a new record."
+            )
+        if base.kind not in cfg.draft_kinds:
+            raise DraftError(
+                f"{record_id} is a {base.kind} record; {base.kind} records cannot be drafted. "
+                "Draftable kinds: " + ", ".join(cfg.draft_kinds)
+            )
+        return base
+
+    def change(self, record_id: Any, changes: Any, base_sha256: Any) -> dict[str, Any]:
+        """Change fields of an existing record. base_sha256 must be the digest of the record's
+        committed line, so a change based on an older line is refused rather than applied over newer
+        data. Calls on one record accumulate; a result equal to the base line is dropped."""
+        cfg = self.config
+        if not isinstance(record_id, str) or not record_id:
+            raise DraftError("id must be a non-empty string")
+        base = self._base_of(record_id)
+        if base_sha256 != base.sha256:
+            raise DraftError(
+                f"base_sha256 {str(base_sha256)[:16]}... does not match the committed line of {record_id} "
+                f"(sha256 {base.sha256}). The record changed since the base was read; read it again and "
+                "redo the change against the current line."
+            )
+        parsed = json.loads(base.line)
+        if _json(parsed) != base.line:
+            raise DraftError(
+                f"The committed line of {record_id} is not in the form this server writes (JSON.stringify "
+                "of the parsed record), so a change would also rewrite fields it does not touch."
+            )
+        current = self.changes.get(record_id) or parsed
+        changed = apply_changes(current, changes, (cfg.id_field, cfg.type_field))
+        try:
+            new_line = _json(changed)
+        except ValueError as error:  # NaN or infinity
+            raise DraftError(f"the changed record is not valid JSON for export: {error}") from error
+        problems, warnings = self._change_checks(parsed, changed)
+        if new_line == base.line:
+            self.changes.pop(record_id, None)
+            status = "unchanged"
+        else:
+            self.changes[record_id] = changed
+            status = "changed"
+        return {
+            "id": record_id,
+            "iri": self.iri(record_id),
+            "status": status,
+            "base_sha256": base.sha256,
+            "sha256": sha256_text(new_line),
+            "fields": field_diff(parsed, changed),
+            "problems": problems,
+            "warnings": warnings,
+            "drafts": self.count,
+        }
+
+    def _change_checks(self, before: dict[str, Any], after: dict[str, Any]) -> tuple[list[str], list[str]]:
+        """Problems and warnings the change brings in. Those the committed line already has are not
+        the change's doing; they are listed as warnings so they cannot block it."""
+        old_problems, old_warnings = self.check(before)
+        problems, warnings = self.check(after)
+        carried = [f"already in the committed line: {p}" for p in problems if p in old_problems]
+        return [p for p in problems if p not in old_problems], [
+            *carried,
+            *(w for w in warnings if w not in old_warnings),
+        ]
+
+    def _changed_entry(self, record_id: str) -> dict[str, Any]:
+        cfg = self.config
+        base = self.base[record_id]
+        before = json.loads(base.line)
+        after = self.changes[record_id]
+        problems, warnings = self._change_checks(before, after)
+        return {
+            "id": record_id,
+            "iri": self.iri(record_id),
+            "kind": after.get(cfg.type_field),
+            "label": after.get(cfg.label_field) if cfg.label_field else None,
+            "base_sha256": base.sha256,
+            "sha256": sha256_text(_json(after)),
+            "fields": field_diff(before, after),
+            "problems": problems,
+            "warnings": warnings,
         }
 
     def remove(self, record_id: str) -> dict[str, Any]:
-        removed = self.records.pop(record_id, None) is not None
+        reverted = self.changes.pop(record_id, None) is not None
+        removed = self.records.pop(record_id, None) is not None or reverted
         linked_from = sorted(rid for rid, r in self.records.items() if record_id in self._targets(r))
-        result: dict[str, Any] = {"id": record_id, "removed": removed, "drafts": len(self.records)}
-        if removed and linked_from:
+        result: dict[str, Any] = {"id": record_id, "removed": removed, "drafts": self.count}
+        if reverted:
+            result["note"] = "The change was dropped; the committed line stands."
+        if removed and not reverted and linked_from:
             result["note"] = (
                 "These drafts still point to the removed id and now carry a warning: "
                 + ", ".join(linked_from)
@@ -578,8 +826,9 @@ class DraftOverlay:
         return out
 
     def diff(self) -> dict[str, Any]:
-        """Every draft against the release: all are additions in this version. Checks are run
-        again over the whole overlay, so a link to a draft added or removed later is current."""
+        """New records (added) and changes to store records (changed, with a field-level diff and
+        the base digest). Checks are run again over the whole overlay, so a link to a draft added
+        or removed later is current."""
         cfg = self.config
         added = []
         for record_id in sorted(self.records):
@@ -600,53 +849,91 @@ class DraftOverlay:
             entry["warnings"] = warnings
             entry.update(self._duplicates(record))
             added.append(entry)
+        changed = [self._changed_entry(rid) for rid in sorted(self.changes)]
+        entries = [*added, *changed]
         return {
             "dataset": self.kg.bundle.dataset,
             "release": self.kg.bundle.version,
             "manifest_sha256": self.kg.bundle.manifest_sha256,
             "added": added,
-            "changed": [],
-            "problems": sum(len(e["problems"]) for e in added),
-            "warnings": sum(len(e["warnings"]) for e in added),
+            "changed": changed,
+            "problems": sum(len(e["problems"]) for e in entries),
+            "warnings": sum(len(e["warnings"]) for e in entries),
         }
 
+    def _remove_files(self, names: tuple[str, ...]) -> list[str]:
+        removed = []
+        if self.out_dir is not None:
+            for name in names:
+                path = self.out_dir / name
+                if path.is_file():
+                    path.unlink()
+                    removed.append(str(path))
+        return removed
+
     def export(self) -> dict[str, Any]:
-        """batch.jsonl (one line per draft, sorted by id) and summary.json (the diff). Refused
-        while any draft has problems. Written under --draft-dir only; returned inline too."""
+        """batch.jsonl (one line per new record, sorted by id), changes.jsonl (one line per changed
+        record, sorted by id; only when there are changes) and summary.json (the diff). Refused
+        while any draft has problems. Written under --draft-dir only; returned inline too.
+
+        A changes line is {"id", "base_sha256", "sha256", "record"}: the whole changed record,
+        written in the key order of its committed line, the digest of that line, and the digest of
+        the record as written, which is what the store's digest becomes."""
         summary = self.diff()
         if summary["problems"]:
-            # A batch from an earlier export would no longer match the overlay; leave none behind.
-            removed = []
-            if self.out_dir is not None:
-                for name in (BATCH_FILE, SUMMARY_FILE):
-                    path = self.out_dir / name
-                    if path.is_file():
-                        path.unlink()
-                        removed.append(str(path))
+            # Files from an earlier export would no longer match the overlay; leave none behind.
+            entries = [*summary["added"], *summary["changed"]]
             return {
                 "exported": False,
                 "reason": "Some drafts have problems. Fix or remove them, then export again.",
-                "problems": {e["id"]: e["problems"] for e in summary["added"] if e["problems"]},
-                "removed": removed,
+                "problems": {e["id"]: e["problems"] for e in entries if e["problems"]},
+                "removed": self._remove_files((BATCH_FILE, CHANGES_FILE, SUMMARY_FILE)),
             }
         batch = "".join(line(self.records[rid], self.config) + "\n" for rid in sorted(self.records))
         batch_bytes = batch.encode("utf-8")
         summary["batch_sha256"] = hashlib.sha256(batch_bytes).hexdigest()
+        changes = "".join(
+            _json(
+                {
+                    "id": rid,
+                    "base_sha256": self.base[rid].sha256,
+                    "sha256": sha256_text(_json(self.changes[rid])),
+                    "record": self.changes[rid],
+                }
+            )
+            + "\n"
+            for rid in sorted(self.changes)
+        )
+        changes_bytes = changes.encode("utf-8")
+        if changes:
+            summary["changes_sha256"] = hashlib.sha256(changes_bytes).hexdigest()
         summary_text = json.dumps(summary, ensure_ascii=False, indent=2) + "\n"
         written = []
+        removed: list[str] = []
         if self.out_dir is not None:
             self.out_dir.mkdir(parents=True, exist_ok=True)
-            for name, data in ((BATCH_FILE, batch_bytes), (SUMMARY_FILE, summary_text.encode("utf-8"))):
+            files = [(BATCH_FILE, batch_bytes)]
+            if changes:
+                files.append((CHANGES_FILE, changes_bytes))
+            else:
+                removed = self._remove_files((CHANGES_FILE,))
+            files.append((SUMMARY_FILE, summary_text.encode("utf-8")))
+            for name, data in files:
                 _write_atomic(self.out_dir / name, data)
                 written.append(str(self.out_dir / name))
-        return {
+        out: dict[str, Any] = {
             "exported": True,
             "records": len(self.records),
             "written": written,
             "batch_sha256": summary["batch_sha256"],
             "batch": batch,
-            "summary": summary,
         }
+        if changes:
+            out.update(changed=len(self.changes), changes_sha256=summary["changes_sha256"], changes=changes)
+        if removed:
+            out["removed"] = removed
+        out["summary"] = summary
+        return out
 
 
 def name_overlap(a: str, b: str) -> float:

@@ -37,10 +37,12 @@ DRAFT_INSTRUCTIONS = """
 
 Drafts are on for this session. draft_upsert adds a new record to a private overlay, as the JSON the
 dataset's store uses (not RDF); it returns problems, warnings and possible duplicates for you to rule
-on. Records already in the release cannot be drafted. Drafts are not visible to search, find_entity,
-describe_resource or sparql_query. draft_diff lists the drafts with their checks, draft_remove drops
-one, and draft_export writes the batch and a summary. Checks here are advisory; the dataset's own
-import is the gate."""
+on. Records already in the release or the store cannot be added again. draft_change changes fields
+of a store record, when the server was started with the store's records (--draft-records), against
+the base_sha256 of the line it read. Drafts are not visible to search, find_entity,
+describe_resource or sparql_query. draft_diff lists new and changed records with their checks,
+draft_remove drops one, and draft_export writes the batch, the changes and a summary. Checks here
+are advisory; the dataset's own import is the gate."""
 
 
 def instructions(kg: KnowledgeGraph, drafts: bool = False) -> str:
@@ -227,7 +229,8 @@ def _add_draft_tools(server: MCPServer, drafts: DraftOverlay) -> None:
             "Add a new record to this session's draft overlay, or replace a draft with the same "
             f"{config.id_field!r}. Pass the whole record as the dataset's store writes it (JSON, not RDF); "
             f"{config.type_field!r} must be one of: {kinds}.{links} Refused if the id is already in the "
-            "release. Returns status (added, replaced or unchanged), problems (the import will refuse "
+            "release or the store records (change those with draft_change). Returns status (added, "
+            "replaced or unchanged), problems (the import will refuse "
             "the record), warnings (it may not: a link target newer than the release, for example) and "
             "possible_duplicates: the top search hits of the same kind whose names share at least half "
             "their words with the label, any release record or draft with the same name ignoring case, "
@@ -241,18 +244,41 @@ def _add_draft_tools(server: MCPServer, drafts: DraftOverlay) -> None:
 
     @server.tool(
         annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False
+        ),
+        description=(
+            "Change fields of an existing record, one of the store records the server was started with "
+            f"(--draft-records; {len(drafts.base)} loaded). base_sha256 is the SHA-256 of the record's "
+            "committed line as you read it; a change against any other line is refused, so a stale base "
+            "never overwrites newer data. changes is a list of {path, value} or {path, remove: true}, "
+            f"where path is a JSON Pointer such as /attributes/licence ({config.id_field!r} and "
+            f"{config.type_field!r} cannot change). Keys you do not touch keep their place: a changed "
+            "value stays where it is and a new key goes at the end of its object. Lists are replaced "
+            "whole. Calls on one record accumulate; draft_remove drops the change. Returns status "
+            "(changed, or unchanged when the result equals the committed line), the field-level diff, and "
+            "the problems and warnings the change brings in."
+        ),
+    )
+    def draft_change(id: str, changes: list[dict[str, Any]], base_sha256: str) -> dict[str, Any]:
+        with caller_errors():
+            return drafts.change(id, changes, base_sha256)
+
+    @server.tool(
+        annotations=ToolAnnotations(
             read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False
         )
     )
     def draft_remove(id: str) -> dict[str, Any]:
-        """Drop a draft from the overlay. Drafts that link to it then carry a warning."""
+        """Drop a new record or a change from the overlay. Drafts that link to a dropped new record
+        then carry a warning; a dropped change leaves the committed line as it is."""
         return drafts.remove(id)
 
     @server.tool(annotations=READ_ONLY)
     def draft_diff() -> dict[str, Any]:
-        """Every draft compared with the release: in this version all are additions (changed is
-        always empty). Per record: kind, label, links, problems, warnings and possible duplicates,
-        checked again across the whole overlay."""
+        """The overlay against the store. added: new records with kind, label, links, problems,
+        warnings and possible duplicates. changed: changed store records with base_sha256 (the
+        committed line), sha256 (the changed line) and fields, a list of {path, change, before,
+        after} per changed key. Checks run again across the whole overlay."""
         return drafts.diff()
 
     @server.tool(
@@ -261,10 +287,12 @@ def _add_draft_tools(server: MCPServer, drafts: DraftOverlay) -> None:
         )
     )
     def draft_export() -> dict[str, Any]:
-        """Export the drafts as batch.jsonl (one record per line, sorted by id, deterministic bytes,
-        numbers written as JavaScript writes them) and summary.json (the diff and the batch
-        checksum). Refused while any draft has problems; a refusal also removes the files of an
-        earlier export, so the directory never holds a stale batch.
+        """Export the drafts as batch.jsonl (new records, one per line, sorted by id, deterministic
+        bytes, numbers written as JavaScript writes them), changes.jsonl when there are changes (one
+        {id, base_sha256, sha256, record} line per changed record, sorted by id; the record keeps
+        the key order of its committed line) and summary.json (the diff and the checksums). Refused
+        while any draft has problems; a refusal also removes the files of an earlier export, so the
+        directory never holds a stale batch.
         Files are written only to the directory the server was started with (--draft-dir), and are
         also returned inline."""
         return drafts.export()

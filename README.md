@@ -1,6 +1,6 @@
 # rdf-kg-mcp
 
-Serve an RDF knowledge graph read-only over the [Model Context Protocol](https://modelcontextprotocol.io), so Claude and other MCP clients can explore and query it. A local client can also draft new records against it and export them for the dataset's own import (see [Drafts](#drafts)).
+Serve an RDF knowledge graph read-only over the [Model Context Protocol](https://modelcontextprotocol.io), so Claude and other MCP clients can explore and query it. A local client can also draft new records and changes to existing ones against it, and export them for the dataset's own import (see [Drafts](#drafts)).
 
 The graph is a **bundle**: a manifest plus RDF files, with a SHA-256 checksum for each file. Inference is done once, when the bundle is built, and stored as its own named graph. The server loads the bundle into an embedded [Oxigraph](https://github.com/oxigraph/oxigraph) store, so there is no database to run or host.
 
@@ -92,14 +92,15 @@ By default `sparql_query` treats the union of all graphs as the default graph, s
 
 ### Drafts
 
-`serve --drafts` adds four tools that let one local client build new records against the release and export them as a batch for the dataset's own import. The records are the JSON the dataset's store uses, not RDF. The bundle manifest's `draft` block (or `--draft-config`) says how records are shaped; nothing about any one dataset is in the server ([docs/bundle-format.md](docs/bundle-format.md#draft-block)).
+`serve --drafts` adds five tools that let one local client build new records against the release, change records already in the store, and export both for the dataset's own import. The records are the JSON the dataset's store uses, not RDF. The bundle manifest's `draft` block (or `--draft-config`) says how records are shaped; nothing about any one dataset is in the server ([docs/bundle-format.md](docs/bundle-format.md#draft-block)).
 
 | Tool | What it does |
 | --- | --- |
-| `draft_upsert` | Adds a new record to the overlay, or replaces a draft with the same id. Refused if the id is already in the release. Returns the status (`added`, `replaced` or `unchanged`), problems, warnings and possible duplicates |
-| `draft_remove` | Drops a draft |
-| `draft_diff` | Every draft with its links, problems, warnings and possible duplicates, checked again across the whole overlay |
-| `draft_export` | Writes `batch.jsonl` (one record per line, sorted by id) and `summary.json` (the diff and the batch checksum) to `--draft-dir`, and returns both inline. Refused while any draft has problems |
+| `draft_upsert` | Adds a new record to the overlay, or replaces a draft with the same id. Refused if the id is already in the release or the store records. Returns the status (`added`, `replaced` or `unchanged`), problems, warnings and possible duplicates |
+| `draft_change` | Changes fields of a store record (see [Changes](#changes-to-existing-records)). Takes the id, the changes and the `base_sha256` of the committed line; refused if that digest does not match |
+| `draft_remove` | Drops a new record or a change |
+| `draft_diff` | `added`: every new record with its links, problems, warnings and possible duplicates. `changed`: every changed record with its base and new digests and a field-level diff. Checked again across the whole overlay |
+| `draft_export` | Writes `batch.jsonl` (new records, one per line, sorted by id), `changes.jsonl` (changed records, when there are any) and `summary.json` (the diff and the checksums) to `--draft-dir`, and returns them inline. Refused while any draft has problems |
 
 Checks, in order:
 
@@ -111,13 +112,24 @@ Checks, in order:
 
 A link target found in neither the release nor the drafts is a warning, not a problem, because the store may have gained it after the release was cut. For the same reason a draft id the store gained after the release passes here, and the import refuses it. Possible duplicates are the top three `search` hits of the same kind on the record's label whose label shares at least half the words of one name with the other, plus the release records whose squashed label is the same (capped at ten, same kind first; `same_name_omitted` counts the rest), plus drafts with the same squashed label or half their words in common (`near name`). The caller rules on each one.
 
-An exported line is written as JavaScript's `JSON.stringify` writes the record, numbers included (`0.00002`, not `2e-05`), so for a store that hashes `JSON.stringify(record)` the digest of a line is the record's digest. If an export is refused, any `batch.jsonl` and `summary.json` left in `--draft-dir` by an earlier export are removed, so the directory never holds a batch that no longer matches the overlay.
+An exported line is written as JavaScript's `JSON.stringify` writes the record, numbers included (`0.00002`, not `2e-05`), so for a store that hashes `JSON.stringify(record)` the digest of a line is the record's digest. If an export is refused, any `batch.jsonl`, `changes.jsonl` and `summary.json` left in `--draft-dir` by an earlier export are removed, so the directory never holds a batch that no longer matches the overlay.
+
+#### Changes to existing records
+
+The bundle holds RDF, not the store's JSON, so the overlay has no exact copy of an existing record to change. The client passes the store's committed lines with `--draft-records` (a `.jsonl` or `.jsonl.gz` file, or a directory of them; repeatable), and `draft_change` changes those:
+
+- `base_sha256` is the SHA-256 of the record's committed line (UTF-8, without the newline) as the caller read it. Any other value is refused, so a change worked out against an older line cannot overwrite newer data. Calls on one record accumulate, each against the same committed line.
+- `changes` is a list of `{"path": "/attributes/licence", "value": ...}` or `{"path": ..., "remove": true}`, with JSON Pointer paths ([RFC 6901](https://www.rfc-editor.org/rfc/rfc6901)) through objects. A list is replaced whole. The id and kind fields cannot change.
+- The change is applied to the committed line as parsed. Keys it does not touch keep their place at every depth; a changed value stays where it was; a new key goes at the end of its object. Nothing is sorted, so the bytes of the untouched fields are the committed bytes. A committed line this server would not write back byte for byte (`1e-05` where JavaScript writes `0.00001`, say) is refused.
+- A result equal to the committed line is `unchanged` and is not exported.
+- Problems the change brings in block the export. Problems the committed line already had are listed as warnings.
+
+Each line of `changes.jsonl` is `{"id", "base_sha256", "sha256", "record"}`: the whole changed record and the digests of the committed line and of the changed one. The dataset's own change command applies it, and should check `base_sha256` against its store again before it writes.
 
 All of this is advisory. The dataset's own import is the gate.
 
 What drafts do not do, in this version:
 
-- Change existing records. `draft_diff` always returns an empty `changed` list. The bundle holds RDF, not the store's JSON, so the overlay has no exact copy of an existing record to change; a change goes through the store itself.
 - Appear in `search`, `find_entity`, `describe_resource` or `sparql_query`. Drafts are not projected into RDF, so they get no inferred statements either.
 - Persist. The overlay is gone when the process exits; export first.
 
@@ -156,7 +168,7 @@ Values never enter the query text without validation. An optional parameter with
 ```text
 rdf-kg-mcp serve BUNDLE [--transport stdio|streamable-http] [--host H] [--port P]
                         [--store memory|disk] [--query-timeout SECONDS] [--max-rows N]
-                        [--drafts [--draft-dir DIR] [--draft-config FILE]]
+                        [--drafts [--draft-dir DIR] [--draft-config FILE] [--draft-records PATH ...]]
 rdf-kg-mcp verify BUNDLE [--quick] [--json]
 rdf-kg-mcp manifest DIR --dataset NAME [--version V] [--graph ROLE=IRI ...] [FILES ...]
 rdf-kg-mcp pack DIR -o BUNDLE.tar.gz
